@@ -1,0 +1,138 @@
+import Testing
+import Foundation
+@testable import CleanerCore
+
+private let referenceNow = Date(timeIntervalSince1970: 1_786_000_000)  // 2026-08-06
+
+@Test func usesNewestSourceFileModificationDate() throws {
+    let temp = TempDir()
+    temp.makeFile("proj/pubspec.yaml", modified: referenceNow.addingTimeInterval(-86_400 * 40))
+    temp.makeFile("proj/lib/main.dart", modified: referenceNow.addingTimeInterval(-86_400 * 3))
+    let project = DiscoveredProject(path: temp.path + "/proj", name: "proj")
+
+    let inspector = ActivityInspector(runner: FakeProcessRunner(responses: [:]))
+    let activity = inspector.lastActivity(of: project)
+    #expect(activity != nil)
+    let newest = try #require(activity)
+    #expect(abs(newest.timeIntervalSince(referenceNow.addingTimeInterval(-86_400 * 3))) < 2)
+}
+
+@Test func ignoresBuildAndCacheDirectories() throws {
+    let temp = TempDir()
+    temp.makeFile("proj/pubspec.yaml", modified: referenceNow.addingTimeInterval(-86_400 * 90))
+    temp.makeFile("proj/build/app.apk", modified: referenceNow)
+    temp.makeFile("proj/.build/debug/proj", modified: referenceNow)
+    temp.makeFile("proj/Build/Products/proj.app", modified: referenceNow)
+    temp.makeFile("proj/.dart_tool/package_config.json", modified: referenceNow)
+    temp.makeFile("proj/node_modules/x/index.js", modified: referenceNow)
+    temp.makeFile("proj/ios/Pods/Manifest.lock", modified: referenceNow)
+    temp.makeFile("proj/.git/index", modified: referenceNow)
+    let project = DiscoveredProject(path: temp.path + "/proj", name: "proj")
+
+    let activity = try #require(
+        ActivityInspector(runner: FakeProcessRunner(responses: [:]))
+            .lastActivity(of: project))
+    #expect(activity < referenceNow.addingTimeInterval(-86_400 * 60))
+}
+
+@Test func gitHeadDateWinsWhenItIsNewer() throws {
+    let temp = TempDir()
+    let projectPath = temp.path + "/proj"
+    temp.makeFile("proj/pubspec.yaml", modified: referenceNow.addingTimeInterval(-86_400 * 90))
+    temp.makeDirectory("proj/.git")
+    let project = DiscoveredProject(path: projectPath, name: "proj")
+
+    let commitEpoch = Int(referenceNow.addingTimeInterval(-86_400 * 2).timeIntervalSince1970)
+    let runner = FakeProcessRunner(responses: [
+        "/usr/bin/git -C \(projectPath) log -1 --format=%ct":
+            ProcessResult(exitCode: 0, stdout: "\(commitEpoch)\n", stderr: "")
+    ])
+
+    let activity = try #require(ActivityInspector(runner: runner).lastActivity(of: project))
+    #expect(abs(activity.timeIntervalSince1970 - Double(commitEpoch)) < 2)
+}
+
+@Test func fileDateWinsWhenItIsNewerThanTheGitDate() throws {
+    let temp = TempDir()
+    let projectPath = temp.path + "/proj"
+    temp.makeFile("proj/lib/main.dart", modified: referenceNow.addingTimeInterval(-86_400 * 2))
+    temp.makeDirectory("proj/.git")
+    let project = DiscoveredProject(path: projectPath, name: "proj")
+
+    let commitEpoch = Int(referenceNow.addingTimeInterval(-86_400 * 90).timeIntervalSince1970)
+    let runner = FakeProcessRunner(responses: [
+        "/usr/bin/git -C \(projectPath) log -1 --format=%ct":
+            ProcessResult(exitCode: 0, stdout: "\(commitEpoch)\n", stderr: "")
+    ])
+
+    let activity = try #require(ActivityInspector(runner: runner).lastActivity(of: project))
+    #expect(abs(activity.timeIntervalSince(referenceNow.addingTimeInterval(-86_400 * 2))) < 2)
+}
+
+@Test func gitIsNotConsultedWhenThereIsNoGitDirectory() {
+    let temp = TempDir()
+    temp.makeFile("proj/pubspec.yaml", modified: referenceNow)
+    let project = DiscoveredProject(path: temp.path + "/proj", name: "proj")
+
+    let runner = RecordingProcessRunner()
+    _ = ActivityInspector(runner: runner).lastActivity(of: project)
+    #expect(runner.recorded.isEmpty)
+}
+
+@Test func gitFailureIsToleratedAndFileDatesStillWin() throws {
+    let temp = TempDir()
+    let projectPath = temp.path + "/proj"
+    temp.makeFile("proj/pubspec.yaml", modified: referenceNow.addingTimeInterval(-86_400 * 5))
+    temp.makeDirectory("proj/.git")
+    let project = DiscoveredProject(path: projectPath, name: "proj")
+
+    // Git fails, but still prints something parseable, and newer than the file date.
+    // Only the exit code separates this from a successful call, so a run that ignored
+    // the exit code would return this epoch instead of the file date.
+    let runner = FakeProcessRunner(responses: [
+        "/usr/bin/git -C \(projectPath) log -1 --format=%ct":
+            ProcessResult(exitCode: 128,
+                          stdout: "\(Int(referenceNow.timeIntervalSince1970))\n",
+                          stderr: "fatal: your current branch does not have any commits yet")
+    ])
+
+    let activity = try #require(ActivityInspector(runner: runner).lastActivity(of: project))
+    #expect(abs(activity.timeIntervalSince(referenceNow.addingTimeInterval(-86_400 * 5))) < 2)
+}
+
+@Test func symlinkedDirectoriesAreNotFollowed() throws {
+    let temp = TempDir()
+    temp.makeFile("proj/pubspec.yaml", modified: referenceNow.addingTimeInterval(-86_400 * 90))
+    // What fvm leaves in every project: a link to a complete SDK elsewhere. Its files
+    // must not count as activity, and the walk must not spend its time in there — on a
+    // real machine "elsewhere" is gigabytes, several projects share it, and a link back
+    // up the tree would make the walk endless.
+    let sdk = temp.makeFile("sdk/bin/flutter", modified: referenceNow)
+    temp.makeSymlink("proj/.fvm-link", to: (sdk as NSString).deletingLastPathComponent)
+    let project = DiscoveredProject(path: temp.path + "/proj", name: "proj")
+
+    let activity = try #require(
+        ActivityInspector(runner: FakeProcessRunner(responses: [:]))
+            .lastActivity(of: project))
+    #expect(activity < referenceNow.addingTimeInterval(-86_400 * 60))
+}
+
+@Test func aSymlinkCycleDoesNotHangTheWalk() throws {
+    let temp = TempDir()
+    temp.makeFile("proj/pubspec.yaml", modified: referenceNow.addingTimeInterval(-86_400 * 5))
+    temp.makeSymlink("proj/sub/loop", to: temp.path + "/proj")
+    let project = DiscoveredProject(path: temp.path + "/proj", name: "proj")
+
+    let activity = try #require(
+        ActivityInspector(runner: FakeProcessRunner(responses: [:]))
+            .lastActivity(of: project))
+    #expect(abs(activity.timeIntervalSince(referenceNow.addingTimeInterval(-86_400 * 5))) < 2)
+}
+
+@Test func emptyProjectDirectoryReturnsNil() {
+    let temp = TempDir()
+    temp.makeDirectory("empty")
+    let project = DiscoveredProject(path: temp.path + "/empty", name: "empty")
+    #expect(ActivityInspector(runner: FakeProcessRunner(responses: [:]))
+        .lastActivity(of: project) == nil)
+}

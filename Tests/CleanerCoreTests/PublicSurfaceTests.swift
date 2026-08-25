@@ -1,0 +1,56 @@
+import Testing
+import Foundation
+// Deliberately NOT `@testable`. Every other file in this target uses `@testable import`,
+// which lifts `internal` to visible and hides the whole problem this file exists to catch:
+// a `public struct` gets no `public` memberwise initialiser, so a type that is public in
+// name can be impossible to construct from another module. The menu bar app target hit
+// exactly that as a compile error on `SimulatorDevice`.
+//
+// If one of these initialisers loses its `public`, this file stops compiling.
+import CleanerCore
+
+@Test func theDeviceAndProtectionTypesCanBeBuiltFromAnotherModule() {
+    let device = SimulatorDevice(
+        udid: "AAA", name: "iPhone 17 Pro", runtimeIdentifier: "iOS-26-5",
+        isBooted: true, sizeBytes: 7_090_000_000,
+        lastBootedAt: Date(timeIntervalSince1970: 1_786_000_000))
+    #expect(device.isBooted)
+    #expect(device.sizeBytes == 7_090_000_000)
+
+    let runtime = SimulatorRuntime(
+        identifier: "iOS-26-5", name: "iOS 26.5", version: "26.5",
+        buildVersion: "23F77", bundlePath: "/rt/26.5.simruntime")
+    #expect(runtime.identifier == "iOS-26-5")
+
+    let avd = AndroidAVD(
+        name: "Pixel_8_API_34", directoryPath: "/avd/Pixel_8_API_34.avd",
+        lastUsed: nil, systemImageRelativePath: "system-images/android-34/google_apis/arm64-v8a")
+    #expect(avd.name == "Pixel_8_API_34")
+
+    let inventory = DeviceInventory(simulators: [device], runtimes: [runtime], avds: [avd])
+    #expect(inventory.simulators.count == 1)
+
+    let set = ProtectionSet(
+        projects: ["/dev/sample-project": .pinnedProject],
+        keptSimulatorUDID: "AAA", keptAVDName: nil,
+        protectedSimulatorUDIDs: ["AAA": .bootedDevice],
+        protectedAVDNames: [:],
+        flutterVersions: [:], gradleDistributions: [:],
+        runtimeIdentifiers: ["iOS-26-5": .runtimeUsedByKeptDevice])
+    #expect(set.protectedSimulatorUDIDs["AAA"] == .bootedDevice)
+    #expect(set.projects["/dev/sample-project"] == .pinnedProject)
+
+    // A `DiscoveredProject` too: `CleanerService.clean` takes the paths of these, so an
+    // app that wants to preview a scan has to be able to build one.
+    let project = DiscoveredProject(path: "/dev/sample-project", name: "sample-project")
+    #expect(project.name == "sample-project")
+}
+
+/// `TildePath` has to be reachable from another module or there would be two expansions
+/// again: `SettingsModel.addProjectRoot` lives in `DevCleanerUI` and has to expand the same
+/// way the engine does, or the root on screen and the root the engine walks are two
+/// different directories. Checked here, without `@testable`, because that is the import the
+/// app really has.
+@Test func theTildeExpansionIsReachableFromAnotherModule() {
+    #expect(TildePath.expanded("~/dev", home: "/Users/tester") == "/Users/tester/dev")
+}
