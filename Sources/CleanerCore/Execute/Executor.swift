@@ -220,7 +220,83 @@ extension PathGuard {
         ".npm",                                      // other.jsPackages -> .npm/_cacache
         ".cocoapods",                                // other.cocoapods -> .cocoapods/repos
         ".bun/install",                              // other.jsPackages -> .bun/install/cache
+        // other.xdgCache, which offers **direct children** of the XDG cache directory. The
+        // directory itself is in `runRelativeForbiddenTargets` as well, so two independent
+        // rules refuse it rather than only `validate`'s "not equal to a root".
+        ".cache",
+        // big.downloads, also direct children only, and the widest root in this list by
+        // some way. It is still the narrowest directory that strictly contains every path
+        // that scanner can emit, which is the rule every other entry here follows; what
+        // keeps `~/Downloads` itself safe is the forbidden-target list below, and what
+        // keeps everything under it out of reach is that no scanner names anything there.
+        "Downloads",
+        // big.aiModels, at `<publisher>/<model>` two levels down. `models` and never
+        // `~/.lmstudio`, whose other children are the app's own configuration.
+        ".lmstudio/models",
+        // big.aiModels again, for the Hugging Face hub's `models--<org>--<name>` children.
+        //
+        // **Redundant today, and here on purpose.** `.cache` above is already a root, so
+        // this admits nothing that was not admitted before it. What it does is state the
+        // narrow thing independently: the only paths under `~/.cache/huggingface` any
+        // scanner may ever name are direct children of `hub`. `hub` itself and
+        // `.cache/huggingface` are both forbidden targets below, which is the half of the
+        // rule that the dictation-app incident turned out to need — see
+        // `XDGCacheScanner.excludedChildren`.
+        ".cache/huggingface/hub",
     ]
+
+    /// **`~/.ollama` is deliberately absent from the roots above.**
+    ///
+    /// `big.aiModels` offers `~/.ollama/models`, whose only containing directory is
+    /// `~/.ollama` — which also holds `id_ed25519`, the private key Ollama signs registry
+    /// requests with. A root there would be a licence over that key for the sake of one
+    /// row, so the store goes in `runRelativeExactPaths` instead and nothing above it is
+    /// reachable at all. Same shape as `fvm/cache.git`, sharper consequence.
+    ///
+    /// A doc comment on the list rather than a value, because the safest form of a licence
+    /// is the one that is not there — and a reader who cannot see why it is not there is a
+    /// reader who will add it.
+    static let ollamaIsNeverARoot = ".ollama"
+
+    /// Container directories a run may delete **inside** and must never delete.
+    ///
+    /// `validate` already refuses a path equal to an allowed root, and the exact-path list
+    /// below already means an app's own folder is outside every root. This is the second,
+    /// independent statement of both — the one that still holds if somebody later decides a
+    /// per-app root would be tidier than forty-eight exact paths, or widens a root by one
+    /// component. Each entry here is a directory whose loss would cost the user something
+    /// no clean could justify: every tool cache at once, the whole Downloads folder, every
+    /// downloaded model, or an editor's settings and a chat app's signed-in session.
+    static let runRelativeForbiddenTargets = [
+        ".cache",                        // other.xdgCache deletes its children
+        "Downloads",                     // big.downloads
+        ".lmstudio",                     // big.aiModels; its siblings are LM Studio's own
+        ".lmstudio/models",              //   configuration, and `models` is the root above
+        // big.aiModels, Hugging Face. `hub` is the root, so `validate` already refuses it;
+        // this is the second, independent statement — and `.cache/huggingface` is the one
+        // path in this whole file with an incident behind it. A user pressed a button over
+        // that directory and their dictation app stopped working for as long as it took to
+        // download 1.1 GB. `XDGCacheScanner.excludedChildren` tells the story; this is the
+        // rule that holds even if some future scanner names it again by accident.
+        ".cache/huggingface",
+        ".cache/huggingface/hub",
+        // big.aiModels, Ollama. The store is an exact allowed path and this is its parent,
+        // which holds the user's signing key. Forbidden is checked **before** the exact
+        // list, so `.ollama/models` must not appear here — and it does not.
+        ollamaIsNeverARoot,
+        // other.electronCaches — "Library/Application Support". Nothing can reach anything
+        // under it any more (see `runRelativeExactPaths`), so this is belt and braces over
+        // a container holding every app's own data. Kept for exactly that reason: it is the
+        // statement that still refuses the container if a root over it is ever added.
+        ElectronCacheScanner.container,
+    ] + ElectronCacheScanner.relativeAppPaths
+        // Every model store `other.xdgCache` refuses to offer, said a second time and from
+        // the other side. `~/.cache` is an allowed root, so "no scanner names it" was the
+        // only thing keeping these out of reach — which is precisely the arrangement that
+        // let `huggingface` be offered in the first place. Generated from the scanner's own
+        // set, so a name added there cannot be left un-forbidden here; sorted, so the list
+        // is the same on every run.
+        + XDGCacheScanner.excludedChildren.sorted().map { ".cache/" + $0 }
 
     /// Single paths the run may delete without their parent becoming a root.
     ///
@@ -230,12 +306,36 @@ extension PathGuard {
     /// root would hand the run a licence over that link as well. `fvm/versions` above
     /// stays exactly as narrow as Task 17 made it; this adds the one further path and
     /// nothing around it.
+    ///
+    /// `big.aiModels` is the other reason, and the sharper one: see `ollamaIsNeverARoot`.
+    ///
+    /// **`other.electronCaches`'s forty-eight paths used to be here and have been taken
+    /// out.** They were a licence granted for a deletion that nothing in the app can now
+    /// ask for. That scanner became `DeckDealing.mentionOnly` — the deck deals it no card,
+    /// and its rows are `startsUnticked`, so they are absent from
+    /// `ScanResult.defaultSelection` and therefore from `CleanerService.cleanDefault`,
+    /// which is the only list `devcleaner clean` and `clean --dry-run` ever build. The CLI
+    /// has no way to tick a single row and the menu bar stopped cleaning when it became a
+    /// status item, so there is no route left that reaches one of those paths.
+    ///
+    /// A licence nobody can exercise is not free. It is 48 approvals sitting inside every
+    /// app folder the list names, waiting for whatever asks next — and the thing beside
+    /// each of them is `Code/User`, every setting and snippet the user has, and
+    /// `Slack/Cookies`, the reason they are still signed in. The app folders and the
+    /// container stay in `runRelativeForbiddenTargets`, so the refusal is now stated twice
+    /// and granted nowhere. `theRunGuardRefusesEveryElectronCachePath` is what holds it.
+    ///
+    /// `AppCacheScanner` needed nothing removed: its rows sit under `Library/Caches`, which
+    /// three other scanners still offer children of, so the root has to stay. What keeps
+    /// the browser folders out of reach is the same thing that keeps the other 150 children
+    /// of that directory out of reach — nothing names them.
     static let runRelativeExactPaths = [
         "fvm/cache.git",                             // flutter.fvm mirror
         ".fvm/cache.git",                            // flutter.fvm mirror, older layout
         ".android/cache",                            // other.localToolCaches
         ".android/build-cache",                      // other.localToolCaches
         ".dartServer",                               // other.localToolCaches
+        AIModelScanner.ollamaRelativeRoot,           // big.aiModels — ".ollama/models"
     ]
 
     /// The guard for one clean, per spec §7.2 rule 1.
@@ -249,9 +349,25 @@ extension PathGuard {
     ///
     /// `androidSDKPath` defaults to the standard location. Pass the same value the
     /// `ScanContext` was built with, or system images installed elsewhere are refused.
+    ///
+    /// `items` is **the rows this run was handed**, and the only thing it is read for is
+    /// the `big.largeFiles` licence: each such row whose path passes
+    /// `LargeFileLicence.granted(for:home:fileManager:)` *again, right now* contributes
+    /// that one path to `allowedExactPaths`, and nothing else about it. It defaults to
+    /// empty, so every other construction of this guard is unchanged and means what it
+    /// meant — and so that a caller which forgets to pass the items loses the operation
+    /// rather than the data.
+    ///
+    /// **The licence is derived here rather than by the caller** for the same reason the
+    /// rest of this list is: one place decides what a run may reach. A caller assembling
+    /// `allowedExactPaths` itself would be a second answer to that, and the first bug in it
+    /// would be a path under `~/Documents` admitted for a row that no longer describes what
+    /// is there. Nothing about the home folder becomes a root; see `LargeFileLicence`.
     public static func forRun(
         home: String, projectRoots: [String], projectPaths: [String],
-        androidSDKPath: String? = nil
+        androidSDKPath: String? = nil,
+        items: [CleanupItem] = [],
+        fileManager: FileManager = .default
     ) -> PathGuard {
         var roots = runRelativeRoots.map { (home as NSString).appendingPathComponent($0) }
 
@@ -294,11 +410,21 @@ extension PathGuard {
             allowedRoots: roots,
             // A project root is both an allowed root and a forbidden target: delete
             // inside `~/dev`, never `~/dev` itself. `validate` already refuses a path
-            // equal to a root; this is the second, independent statement of it.
-            forbiddenTargets: projectRoots + projectPaths,
+            // equal to a root; this is the second, independent statement of it — and
+            // `runRelativeForbiddenTargets` says the same thing about the containers the
+            // newer scanners work inside.
+            forbiddenTargets: projectRoots + projectPaths
+                + runRelativeForbiddenTargets.map {
+                    (home as NSString).appendingPathComponent($0)
+                },
+            // The fixed list, plus whatever the handed rows earn one file at a time.
+            // Checked **after** the forbidden set by `validate`, so a licence can never
+            // re-admit a forbidden target — a large file that somehow sat at a discovered
+            // project's own path is still refused.
             allowedExactPaths: runRelativeExactPaths.map {
                 (home as NSString).appendingPathComponent($0)
-            })
+            } + LargeFileLicence.allowedExactPaths(
+                for: items, home: home, fileManager: fileManager))
     }
 }
 
@@ -328,6 +454,33 @@ public struct Executor: @unchecked Sendable {
     /// `RunRecord.unfinishedReasons` prints them as "\(name): \(reason)".
     public static let cancelledReason =
         "you cancelled the run before this item, so nothing was attempted for it"
+
+    /// How many visible names to try before a project's build folder goes under its own.
+    ///
+    /// A collision is already unlikely — the name has the project in it and lands beside
+    /// the folder it is named after — and twenty is far past the point where something
+    /// other than chance is going on. Bounded rather than open-ended because this loop
+    /// stats the disk, and a run that could not find a free name in twenty tries should
+    /// get on with the clean rather than keep counting.
+    static let visibleNameAttempts = 20
+
+    /// The reason on a row that could neither be trashed **nor** put back under its own
+    /// name.
+    ///
+    /// The one outcome of the visible rename that costs the user something real, and it
+    /// needs two failures in a row to reach: gigabytes are sitting in their project under a
+    /// name no future scan recognises, so nothing will offer the folder again and nothing
+    /// will tell them it is there. This sentence is the only record, so it says where the
+    /// folder is and what to call it.
+    ///
+    /// Lower case and a full clause, like `cancelledReason`, because
+    /// `RunRecord.unfinishedReasons` prints it as "\(name): \(reason)".
+    static func couldNotBePutBackReason(
+        _ trashError: String, nowAt path: String, originalName: String
+    ) -> String {
+        "\(trashError) — and it could not be put back afterwards, so the folder is now at "
+            + "\(path); rename it to \(originalName) if you want it offered again"
+    }
 
     private let pathGuard: PathGuard
     private let runner: any ProcessRunner
@@ -422,7 +575,7 @@ public struct Executor: @unchecked Sendable {
             } else {
                 entries.append(perform(item, emulators: emulators, bootedSimulators: booted))
             }
-            // Reported for a skipped row too, so the counter the popover shows still
+            // Reported for a skipped row too, so the counter the card shows still
             // reaches its total instead of stopping part way with no explanation.
             progress(ExecutionProgress(
                 completed: index + 1, total: items.count, currentName: item.name))
@@ -567,18 +720,35 @@ public struct Executor: @unchecked Sendable {
             } catch {
                 return entry(.failed, target: path, reason: String(describing: error))
             }
-            do {
-                // Act on the path the guard approved, never the caller's string —
-                // that is what keeps the checked thing and the removed thing the same.
-                // Neither trash nor remove follows a symlink; a link moves as a link.
-                if moveToTrash {
-                    let location = try remover.trash(approved)
-                    return entry(.trashed, target: approved, trashedTo: location)
+            // Act on the path the guard approved, never the caller's string —
+            // that is what keeps the checked thing and the removed thing the same.
+            // Neither trash nor remove follows a symlink; a link moves as a link.
+            //
+            // `goesToTheTrash`, never `moveToTrash` on its own. An `.irreplaceable` row is
+            // one of the user's own files and is **always** trashed, whatever the setting
+            // says, because there would be nothing anywhere to get it back from; if the
+            // trash fails, the row fails rather than falling through to a removal the user
+            // never agreed to. The rule is on `CleanupItem.goesToTheTrash(moveToTrash:)`,
+            // which is also what the CLI's plan splits on, so the listing before the run
+            // and the run itself cannot disagree.
+            guard item.goesToTheTrash(moveToTrash: moveToTrash) else {
+                do {
+                    try remover.remove(approved)
+                    return entry(.deleted, target: approved)
+                } catch {
+                    return entry(.failed, target: approved, reason: error.localizedDescription)
                 }
-                try remover.remove(approved)
-                return entry(.deleted, target: approved)
-            } catch {
-                return entry(.failed, target: approved, reason: error.localizedDescription)
+            }
+            switch trashUnderAVisibleName(item, approved: approved) {
+            case .trashed(let location):
+                // `target` is the path the user cleaned, whatever the folder was called on
+                // its way out. The stored run log, `AppModel`'s pruning and the item's own
+                // identity all key on it, and the rename is a detail of how it got to the
+                // Trash. Where it landed is `trashedTo` — which is the half the user needs,
+                // because that is the name they will be looking at.
+                return entry(.trashed, target: approved, trashedTo: location)
+            case .failed(let reason):
+                return entry(.failed, target: approved, reason: reason)
             }
 
         // The two simctl cases below always report `.deleted`, never `.trashed`.
@@ -646,6 +816,118 @@ public struct Executor: @unchecked Sendable {
                 return entry(.deleted, target: name)
             }
         }
+    }
+
+    // MARK: the Trash, under a name the user can see
+
+    private enum TrashOutcome {
+        /// In the Trash. `location` is where the remover says it landed, which is `nil` only
+        /// if the remover could not say.
+        case trashed(location: String?)
+        case failed(reason: String)
+    }
+
+    /// Moves one path to the Trash, renaming a project's build folder first so that the
+    /// user can find it there.
+    ///
+    /// **Why this exists.** The first person to use the project deck cleaned six projects,
+    /// moved 4.4 GB, opened the Trash and saw nothing. Everything they had cleaned was
+    /// called `.build`, `.build 12-22-29-584` or `.dart_tool`, and Finder hides a name
+    /// beginning with a dot in the Trash exactly as it does everywhere else. They concluded
+    /// the app had deleted the lot. Even the folders Finder does draw arrive as five
+    /// identical things called `build`, which cannot be told apart or put back. So the
+    /// folder is renamed to `ProjectRowPath.trashName` — "Photo Tool iOS – .build"
+    /// — before it goes.
+    ///
+    /// **Every failure falls back to today's behaviour.** The rename is cosmetic. It must
+    /// never be the reason a clean removes less than it said it would, and it must never be
+    /// the reason the guard is worked around: the sibling path is validated before anything
+    /// moves, and a guard that refuses it means the folder goes under its own name.
+    ///
+    /// **The two honest costs.**
+    ///
+    /// 1. Finder's "Put Back" restores the folder under the **visible** name, so a user who
+    ///    changes their mind gets `<project>/Photo Tool iOS – .build` rather than
+    ///    `<project>/.build`. For regenerable build output that is clutter and not a loss —
+    ///    the next build makes the real one again, and the stored run log records the
+    ///    original `target` either way, so the history still says what was cleaned.
+    /// 2. There is a window between the rename and the trash in which the folder is on disk
+    ///    under a name no scan recognises. It is two syscalls wide, the rename is atomic and
+    ///    within one directory, and a crash inside it leaves the data intact under a name
+    ///    the doc comment on `couldNotBePutBackReason` tells the user how to undo.
+    private func trashUnderAVisibleName(
+        _ item: CleanupItem, approved: String
+    ) -> TrashOutcome {
+        guard let visible = visibleSibling(for: item, approved: approved) else {
+            return trashing(approved)
+        }
+        do {
+            // Same directory, so this is a rename rather than a copy: atomic, on one
+            // volume, and `moveItem` renames a symlink as a symlink rather than following
+            // it — the same property the removal itself depends on.
+            try fileManager.moveItem(atPath: approved, toPath: visible)
+        } catch {
+            return trashing(approved)
+        }
+        switch trashing(visible) {
+        case .trashed(let location):
+            return .trashed(location: location)
+        case .failed(let reason):
+            // Put it back. A folder that could not be trashed has to be where every future
+            // scan will look for it, or the clean has cost the user the folder's visibility
+            // without gaining them the space.
+            do {
+                try fileManager.moveItem(atPath: visible, toPath: approved)
+                return .failed(reason: reason)
+            } catch {
+                return .failed(reason: Self.couldNotBePutBackReason(
+                    reason, nowAt: visible,
+                    originalName: (approved as NSString).lastPathComponent))
+            }
+        }
+    }
+
+    private func trashing(_ path: String) -> TrashOutcome {
+        do {
+            return .trashed(location: try remover.trash(path))
+        } catch {
+            return .failed(reason: error.localizedDescription)
+        }
+    }
+
+    /// The path to rename this folder to before trashing it, or `nil` for "leave it alone".
+    ///
+    /// Beside the folder itself rather than at the project root, which matters for a nested
+    /// name: `ios/Pods` becomes `<project>/ios/sample_app – ios-Pods`. Same directory is
+    /// what makes the move a rename.
+    ///
+    /// Only `ProjectBuildOutputScanner`'s rows. Every other scanner works on a shared cache
+    /// inside a tool's own directory — `~/Library/Caches/Yarn`, a simulator runtime, the
+    /// pub cache — where the folder's name already is the name of the thing and there is no
+    /// project to put in front of it. Those rows reach the Trash exactly as they did before.
+    private func visibleSibling(for item: CleanupItem, approved: String) -> String? {
+        guard item.scannerID == ProjectBuildOutputScanner.scannerID,
+              let visible = ProjectRowPath.trashName(of: approved, named: item.name)
+        else { return nil }
+
+        let parent = (approved as NSString).deletingLastPathComponent
+        for attempt in 1...Self.visibleNameAttempts {
+            // " 2", " 3", … the way Finder itself numbers a name that is taken. The way
+            // this is reached in practice is a previous run whose trash failed and whose
+            // rename back failed with it, leaving the old visible name in the project —
+            // which is precisely the case where overwriting would destroy the data the
+            // reason on that run told the user how to recover.
+            let candidate = attempt == 1 ? visible : "\(visible) \(attempt)"
+            let sibling = (parent as NSString).appendingPathComponent(candidate)
+            guard !fileManager.fileExists(atPath: sibling) else { continue }
+            // Validated **before** anything moves, and the validated string is what is
+            // returned, so the rename acts on the path the guard checked rather than on the
+            // one this function assembled. `approved` came out of the same guard, so its
+            // parent is already canonical and the two really are one directory.
+            guard let validated = try? pathGuard.validate(sibling) else { return nil }
+            return validated
+        }
+        return nil
     }
 
     private enum AVDFileRemoval {

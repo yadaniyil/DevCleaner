@@ -28,7 +28,8 @@ public enum PickerChoices {
     /// Every simulator the scan met, protected ones included.
     ///
     /// `SimulatorDevicesScanner` emits a row for every device — that is what puts the
-    /// greyed "kept" rows in the popover — so the scan result is the complete list, with
+    /// the deck's own "left alone because they are in use" lines — so the scan result is the
+    /// complete list, with
     /// the name and the measured size already in it. There is no "list every device" call
     /// on `CleanerService` to ask instead.
     public static func simulators(in result: ScanResult) -> [DeviceChoice] {
@@ -263,7 +264,7 @@ public struct SettingsModel: Sendable, Equatable {
     /// The storage means "always skip" and the switch means "look at this", so something has
     /// to invert. That inversion used to sit in the view — `set: { setSkipped(id, !$0) }` —
     /// where no test could reach it, because a test target cannot import an executable. Drop
-    /// or misplace the `!` and all sixteen switches invert together: the user turns a scanner
+    /// or misplace the `!` and every switch inverts together: the user turns a scanner
     /// **on**, the identifier goes into `alwaysSkipScannerIDs`, and that whole group leaves
     /// the scan and the total with nothing on screen to say why. Paired with
     /// `ScannerRow.isOn(in:)`, which is the reading half.

@@ -182,7 +182,7 @@ public struct ProtectionResolver: @unchecked Sendable {
         }
 
         // 3. Used within `deviceRecentUseDays`. The day count comes from settings and
-        //    is carried into the reason, so the popover text matches the setting.
+        //    is carried into the reason, so what the user reads matches the setting.
         let recentCutoff = now.addingTimeInterval(-Double(settings.deviceRecentUseDays) * 86_400)
         for candidate in dated where candidate.date >= recentCutoff {
             protected[candidate.id] = .recentlyUsedDevice(days: settings.deviceRecentUseDays)

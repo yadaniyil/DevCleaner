@@ -22,11 +22,16 @@ struct DevCleanerApp: App {
     }
 
     var body: some Scene {
-        // The primary scene: a regular desktop window, opened centred at launch like any
-        // other app. First in the body so it, not the menu bar item, is what launching
-        // the app means. The menu bar item below stays as the quick glance-and-clean
-        // surface; both show the same model, so they can never disagree.
-        Window(PopoverText.productName, id: "main") {
+        // The primary scene, and the only one that cleans: a regular desktop window, opened
+        // centred at launch like any other app. First in the body so it, not the menu bar
+        // item, is what launching the app means. The menu bar item below is a status
+        // item — a glance at the same model, and a button that opens this window.
+        //
+        // `MainWindowMetrics.sceneID` rather than a literal, because the panel's primary
+        // button passes the same string to `openWindow(id:)` and `openWindow` fails
+        // silently on an identifier that matches no scene. That constant says why the
+        // identifier is `deck`.
+        Window(ChromeText.productName, id: MainWindowMetrics.sceneID) {
             MainWindowView(model: model, scans: scans)
         }
         .defaultSize(
@@ -34,7 +39,7 @@ struct DevCleanerApp: App {
         .defaultPosition(.center)
 
         MenuBarExtra {
-            PopoverView(model: model, scans: scans)
+            StatusPanelView(model: model, scans: scans)
         } label: {
             // Every word here comes from `MenuBarLabel`, including the accessibility name:
             // a string a user can read is a string a test must be able to reach, and a test
@@ -42,22 +47,26 @@ struct DevCleanerApp: App {
             Image(systemName: MenuBarLabel.symbolName)
                 .accessibilityLabel(MenuBarLabel.accessibilityTitle)
                 // On the label, because the label is on screen from the moment the app
-                // launches while the popover's content view does not exist until somebody
+                // launches while the panel's content view does not exist until somebody
                 // clicks the icon. A `.task` on the content would mean the launch scan
-                // never ran for a user who never opened the popover — which is every user
+                // never ran for a user who never opened the panel — which is every user
                 // who leaves it running in the background, the case this app is for.
                 //
                 // The loop itself decides nothing here: when to scan is `ScanScheduler`,
                 // and how long to wait is `BackgroundScanLoop`, both in the library where
                 // tests can reach them.
                 .task { await scans.run() }
+            // The deck's own default offer, which is also the number the panel under this
+            // label prints: `ProjectDeck.defaultOfferBytes` says why it is that total and
+            // not the scan's.
             if let text = MenuBarLabel.text(
-                selection: model.selection, showsAmount: model.settings.menuBarShowsAmount) {
+                deck: model.projectDeck, showsAmount: model.settings.menuBarShowsAmount) {
                 Text(text)
             }
         }
-        // `.window`, not the default `.menu`: spec §8.2 is a popover with checkboxes,
-        // progress and a stacked bar, none of which a menu can draw.
+        // `.window`, not the default `.menu`: the panel sets a size in large type, draws a
+        // spinner beside a progress line and puts a filled primary button under a rule,
+        // none of which a menu can do.
         .menuBarExtraStyle(.window)
 
         // The standard settings window, filled in by Task 11. Declared here so

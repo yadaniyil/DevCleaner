@@ -13,8 +13,14 @@ public struct DiscoveredProject: Sendable, Equatable, Hashable {
 // @unchecked because of the stored FileManager — see Global Constraints.
 public struct ProjectDiscovery: @unchecked Sendable {
     /// Directories that never contain a project we care about and can be huge.
+    ///
+    /// `.build` is listed although the walk already skips every dot-entry below, and the
+    /// duplication is deliberate: SwiftPM checks its dependencies out into
+    /// `.build/checkouts`, each with a `Package.swift` of its own, so the moment that
+    /// marker was added this became the directory with the most false projects inside it.
+    /// Naming it here means the answer does not depend on the dot rule outliving it.
     static let skipped: Set<String> = [
-        "node_modules", "build", ".dart_tool", "Pods", "DerivedData", "Carthage",
+        "node_modules", "build", ".build", ".dart_tool", "Pods", "DerivedData", "Carthage",
         ".git", ".gradle", ".symlinks", "vendor", "target",
     ]
 
@@ -60,11 +66,16 @@ public struct ProjectDiscovery: @unchecked Sendable {
     /// computed for all 257 projects on a real dev machine and consulted nowhere — and a
     /// `public` type carried for no reader is a type the next person has to keep working.
     /// What the walk actually needs is the one bit below.
+    /// `Package.swift` is the newest marker, and the one whose absence cost the most: a
+    /// Swift package with no `.xcodeproj` beside it — which is most of them, this
+    /// repository included — matched nothing here, so the walk never reported it and no
+    /// scanner ever saw its `.build`. That is 946 MB in one project on a real dev
+    /// machine, before its ten `.build-…` siblings.
     static func isProject(_ entries: [String]) -> Bool {
         entries.contains { entry in
             switch entry {
             case "pubspec.yaml", "package.json", "build.gradle", "build.gradle.kts",
-                 "Cargo.toml", "go.mod":
+                 "Cargo.toml", "go.mod", "Package.swift":
                 return true
             default:
                 return entry.hasSuffix(".xcodeproj") || entry.hasSuffix(".xcworkspace")

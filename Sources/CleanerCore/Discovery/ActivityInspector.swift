@@ -7,8 +7,27 @@ public struct ActivityInspector: @unchecked Sendable {
     static let ignoredDirectories: Set<String> = [
         "build", ".build", "Build", ".dart_tool", "node_modules", "Pods", ".gradle",
         "DerivedData", ".git", ".symlinks", ".fvm", "target", ".idea", ".vscode",
-        "Carthage",
+        "Carthage", ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", ".expo",
     ]
+
+    /// Whether a directory is build output, and so says nothing about the human.
+    ///
+    /// The fixed set above, plus every `.build-<variant>` folder that really holds build
+    /// output. A project that builds into `.build-release`, `.build-device` and eight more
+    /// beside them — one real project here has eleven — touches all of them on every build.
+    /// `ProjectBuildOutputScanner` offers exactly those folders for deletion, so reading
+    /// them as activity would protect the project from the clean *because of* the folders
+    /// the clean is for.
+    ///
+    /// The question is put to the scanner's own rule, `holdsBuildOutput`, rather than
+    /// answered from the prefix: a hand-written `.build-notes` is the user's work, the
+    /// scanner refuses to offer it, and editing it is activity. One rule, so "is this build
+    /// output" cannot have one answer when deleting and another when protecting.
+    static func isIgnored(_ entry: String, at path: String, fileManager: FileManager) -> Bool {
+        if ignoredDirectories.contains(entry) { return true }
+        return entry.hasPrefix(ProjectBuildOutputScanner.buildVariantPrefix)
+            && ProjectBuildOutputScanner.holdsBuildOutput(path, fileManager: fileManager)
+    }
 
     private let runner: any ProcessRunner
     private let fileManager: FileManager
@@ -45,7 +64,7 @@ public struct ActivityInspector: @unchecked Sendable {
                       let type = attributes[.type] as? FileAttributeType else { continue }
                 switch type {
                 case .typeDirectory:
-                    guard !Self.ignoredDirectories.contains(entry) else { continue }
+                    guard !Self.isIgnored(entry, at: child, fileManager: fileManager) else { continue }
                     stack.append(child)
                 case .typeRegular:
                     guard let modified = attributes[.modificationDate] as? Date else { continue }

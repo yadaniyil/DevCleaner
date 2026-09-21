@@ -144,7 +144,7 @@ import CleanerCore
 
 /// Spec §9 and the handoff's performance note. Under the Swift 7 default a nonisolated
 /// async function inherits the caller's isolation, and `CleanerService.scan` would then
-/// run a ~29-second synchronous prefix on the main thread with the popover open on top of
+/// run a ~29-second synchronous prefix on the main thread with a card on screen over
 /// it. `@concurrent` on the `CleanerEngine` requirements is what stops that, and this is
 /// the test that fails if somebody removes it.
 @MainActor

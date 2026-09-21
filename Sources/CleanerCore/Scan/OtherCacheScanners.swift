@@ -35,9 +35,13 @@ extension FixedLocationScan {
         let location: FixedLocationScan
     }
 
+    /// `startsUnticked` for a scanner whose rows must never be in a default clean at all —
+    /// the two `DeckDealing.mentionOnly` ones. It is **or**-ed with the unmeasured case
+    /// below rather than replacing it, so a scanner that asks for it cannot accidentally
+    /// tick a row `du` could not size.
     static func items(
         _ locations: [FixedLocationScan], scannerID: String, group: GroupID,
-        context: ScanContext, risk: RiskLevel = .safe
+        context: ScanContext, risk: RiskLevel = .safe, startsUnticked: Bool = false
     ) async -> [CleanupItem] {
         let present = locations.compactMap { location -> Found? in
             let path = context.homePath(location.relativePath)
@@ -62,7 +66,7 @@ extension FixedLocationScan {
                 scannerID: scannerID, group: group, path: found.path,
                 name: found.location.name, detail: found.location.detail,
                 sizeBytes: size.bytes, risk: found.location.risk ?? risk,
-                startsUnticked: size.unmeasured,
+                startsUnticked: size.unmeasured || startsUnticked,
                 sizeMayBeShared: found.location.sizeMayBeShared)
         }
     }
@@ -205,6 +209,29 @@ public struct LibraryCachesScanner: CleanupScanner {
         Allowed(folder: "Google/AndroidStudio", name: "Android Studio",
                 detail: "rebuilt the next time the IDE opens a project",
                 risk: .safe, versioned: true),
+        // Playwright's browsers: 0.5 GB on a real dev machine, and the largest thing here
+        // that a `npm test` cannot bring back on its own. `.elevated`, because the fetch
+        // is Chromium, Firefox and WebKit from Microsoft's CDN.
+        Allowed(folder: "ms-playwright", name: "Playwright browsers",
+                detail: "re-downloaded on the next playwright install",
+                risk: .elevated, versioned: false),
+        Allowed(folder: "pip", name: "pip downloads",
+                detail: "re-downloaded on the next pip install",
+                risk: .elevated, versioned: false),
+        // The `@types` packages `typescript` fetches for a project with no local ones.
+        Allowed(folder: "typescript", name: "TypeScript type downloads",
+                detail: "re-downloaded the next time an editor needs them",
+                risk: .elevated, versioned: false),
+        // Node's headers and libraries, downloaded per Node version so a native module
+        // can be compiled against it.
+        Allowed(folder: "node-gyp", name: "Node build headers",
+                detail: "re-downloaded the next time a native module is built",
+                risk: .elevated, versioned: false),
+        // The one purely local entry of the four: `go build` writes it and `go build`
+        // remakes it, with no network involved at all.
+        Allowed(folder: "go-build", name: "Go build cache",
+                detail: "rebuilt on the next go build",
+                risk: .safe, versioned: false),
     ]
 
     private struct Found {

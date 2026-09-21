@@ -44,11 +44,30 @@ import Foundation
 /// `ProjectDiscovery` would report every folder under `~/dev` as a project.
 @Test func everyProjectMarkerIsRecognisedAndAnOrdinaryFolderIsNot() {
     for marker in ["pubspec.yaml", "package.json", "build.gradle", "build.gradle.kts",
-                   "Cargo.toml", "go.mod", "Example.xcodeproj", "Example.xcworkspace"] {
+                   "Cargo.toml", "go.mod", "Package.swift",
+                   "Example.xcodeproj", "Example.xcworkspace"] {
         #expect(ProjectDiscovery.isProject(["README.md", marker]), "\(marker) not recognised")
     }
     #expect(!ProjectDiscovery.isProject(["README.md", "src", "Makefile", "pubspec.lock"]))
     #expect(!ProjectDiscovery.isProject([]))
+}
+
+/// A Swift package with no Xcode project beside it, which is what most SwiftPM projects
+/// are — this repository included. Without `Package.swift` on the marker list the walk
+/// never reports one, so its `.build` folder is invisible to every scan: 946 MB in
+/// `~/dev/workspace-one/sample-game` alone, before its ten `.build-…` siblings.
+@Test func findsASwiftPackageThatHasNoXcodeProject() throws {
+    let temp = TempDir()
+    temp.makeFile("dev/tool/Package.swift")
+    temp.makeDirectory("dev/tool/Sources/tool")
+    temp.makeDirectory("dev/tool/.build")
+
+    let found = ProjectDiscovery().discover(roots: [temp.path + "/dev"])
+
+    #expect(found.count == 1)
+    let project = try #require(found.first)
+    #expect(project.name == "tool")
+    #expect(project.path == temp.path + "/dev/tool")
 }
 
 @Test func doesNotDescendIntoARecognisedProject() throws {
@@ -91,6 +110,11 @@ import Foundation
     temp.makeFile("dev/app/package.json")
     temp.makeFile("dev/other/node_modules/leftpad/package.json")
     temp.makeFile("dev/other/build/inner/pubspec.yaml")
+    // SwiftPM checks its dependencies out inside `.build`, and each checkout carries its
+    // own `Package.swift`. Reported as projects they would be walked for activity and
+    // measured one by one, and each one's own `.build` offered for deletion — inside a
+    // folder that is itself already offered whole.
+    temp.makeFile("dev/other/.build/checkouts/swift-testing/Package.swift")
     let found = ProjectDiscovery().discover(roots: [temp.path + "/dev"])
     #expect(found.map(\.name) == ["app"])
 }

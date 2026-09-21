@@ -1,7 +1,7 @@
 import Foundation
 import CleanerCore
 
-/// The last scan, on disk, so the popover opens instantly instead of waiting 51 seconds.
+/// The last scan, on disk, so the app opens on a deck instead of waiting 51 seconds.
 ///
 /// Spec §9: `~/Library/Application Support/DevCleaner/cache.json`, beside `settings.json`
 /// and the `runs` directory.
@@ -41,13 +41,13 @@ public struct ScanCache: Sendable {
 
     /// Throws away the stored scan.
     ///
-    /// Called when a clean has just made it false. Without this the popover reopens on the
+    /// Called when a clean has just made it false. Without this the app reopens on the
     /// next launch showing the caches it removed, at the sizes they were before the run,
     /// with an age that says the measurement is newer than the clean.
     ///
     /// A cache that is not there is already discarded, so a missing file is success rather
     /// than an error — the machine that has never scanned reaches this the first time a
-    /// clean is run from a cache-less popover.
+    /// clean is run with no cache behind it.
     ///
     /// Throws for anything else, for the same reason `save` does: a stale cache the app
     /// could not delete is exactly the failure this exists to prevent, and swallowing it
@@ -62,7 +62,7 @@ public struct ScanCache: Sendable {
 
     /// Stores one scan and returns the file it was written to.
     ///
-    /// Throws rather than swallowing, so the caller can say "the popover is showing a
+    /// Throws rather than swallowing, so the caller can say "the app is showing a
     /// scan it could not save" instead of silently showing a stale age forever.
     @discardableResult
     public func save(_ result: ScanResult) throws -> URL {

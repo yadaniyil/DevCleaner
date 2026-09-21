@@ -171,9 +171,10 @@ private func makeLoop(
 /// `scheduler.request(.manual, …)` from here instead would prove the scheduler coalesces and
 /// nothing about whether the app ever asks it to.
 ///
-/// **A click cannot really land here today.** The Rescan button is `.disabled(model.isBusy)`,
-/// so the UI cannot press it mid-scan, and this chain is only reachable from a caller of
-/// `rescan()` that the popover does not have. It is tested because the rule it enforces —
+/// **A click cannot really land here today.** Both Scan again buttons are
+/// `.disabled(model.isBusy)`, so the UI cannot press one mid-scan, and this chain is only
+/// reachable from a caller of `rescan()` that neither surface has. It is tested because the
+/// rule it enforces —
 /// start what `finished(at:)` hands back, every time — is what stops the scheduler wedging,
 /// and because enabling that button, or adding a second caller, must not be the moment
 /// anybody discovers the loop only ran one link.

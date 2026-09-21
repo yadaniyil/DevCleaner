@@ -1,4 +1,21 @@
+# macOS
 .DS_Store
+
+# SwiftPM / Xcode
 .build/
-build/
+.swiftpm/
+DerivedData/
+xcuserdata/
 *.xcuserdatad
+*.xcodeproj
+*.xcworkspace
+
+# The assembled app (Scripts/make-app.sh)
+build/
+
+# Editors and agents' local state
+.vscode/
+.idea/
+.claude/
+.env
+.env.*

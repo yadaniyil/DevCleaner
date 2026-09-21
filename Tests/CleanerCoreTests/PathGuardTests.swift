@@ -110,6 +110,38 @@ private func canonical(_ temp: TempDir) -> String {
     }
 }
 
+/// **A forbidden target whose own last component is a symlink, inside an allowed root.**
+///
+/// The hole this closes: forbidden targets used to be registered under `canonicalise`
+/// alone, which resolves the leaf too, while `validate` compares
+/// `canonicaliseKeepingLeaf`. A target that is itself a symlink was therefore stored under
+/// its **destination** and matched nothing the guard was ever asked about.
+///
+/// Two real layouts reach it, and this fixture is the first. `~/dev/current -> ~/dev/app-v3`:
+/// `ProjectDiscovery` follows the link and reports `~/dev/current` as a project, which
+/// `forRun` lists as a forbidden target — and `~/dev` is an allowed root, so the forbidden
+/// set was the only thing standing between a run and the whole project. The second is
+/// `~/.cache/huggingface` moved to an external disk by symlink, sitting inside the allowed
+/// `.cache` root, which is the arrangement the dictation-app incident was about.
+///
+/// The destination stays refused as well, because both spellings are registered: the two
+/// names are one directory and a rule about it has to hold under either.
+@Test func aForbiddenTargetThatIsASymlinkInsideAnAllowedRootIsStillRefused() throws {
+    let temp = TempDir()
+    let real = temp.makeDirectory("allowed/app-v3")
+    let link = temp.makeSymlink("allowed/current", to: real)
+    let sut = guardFor(temp, forbidden: [link])
+
+    // The exact case, not `Violation.self`: the link is inside the allowed root, so a guard
+    // that had lost the rule would admit it rather than throwing something else, and a
+    // type-only assertion could not tell a refusal from the right refusal.
+    #expect(throws: PathGuard.Violation.forbiddenTarget(link)) { try sut.validate(link) }
+    #expect(throws: PathGuard.Violation.forbiddenTarget(real)) { try sut.validate(real) }
+    // Still only the target itself. A build folder inside it is what the root is for.
+    temp.makeDirectory("allowed/app-v3/build")
+    #expect(try sut.validate(real + "/build") == canonical(temp) + "/allowed/app-v3/build")
+}
+
 @Test func refusesForbiddenTargetSuppliedInADifferentUnicodeNormalisation() throws {
     let temp = TempDir()
     // Created and registered with the decomposed spelling of "é" (U+0065 U+0301), which is

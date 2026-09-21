@@ -75,7 +75,7 @@ private func row(_ name: String, path: String, size: Int64,
 /// `Settings.alwaysSkipScannerIDs`, so a rename silently switches a scanner back on for a
 /// user who had switched it off, and a scanner dropped from the registry stops running
 /// with nothing anywhere to say so.
-@Test func theRegistryHoldsExactlyTheseSeventeenIdentifiers() {
+@Test func theRegistryHoldsExactlyTheseTwentyThreeIdentifiers() {
     #expect(Set(CleanerService.scannerIDs) == [
         "xcode.derivedData", "xcode.archives", "xcode.deviceSupport",
         "ios.simulators", "ios.runtimes", "ios.simulatorCaches",
@@ -83,14 +83,16 @@ private func row(_ name: String, path: String, size: Int64,
         "flutter.pubCache", "flutter.fvm",
         "projects.buildOutput",
         "other.cocoapods", "other.jsPackages", "other.localToolCaches",
-        "other.libraryCaches",
+        "other.libraryCaches", "other.appCaches", "other.xdgCache",
+        "other.electronCaches",
+        "big.downloads", "big.aiModels", "big.largeFiles",
     ])
     // The plan said fifteen. `android.ndk` arrived after it was written, and counting is
     // what catches the next one being added to the package but not to this list.
-    #expect(CleanerService.allScanners().count == 17)
+    #expect(CleanerService.allScanners().count == 23)
 }
 
-/// The order the popover draws, and the group each row lands in. Order is part of the
+/// The order the listing prints, and the group each row lands in. Order is part of the
 /// contract: a list that reshuffles between builds moves the tick boxes under the cursor.
 @Test func theRegistryListsTheScannersInDisplayOrderWithTheirGroups() {
     let listed = CleanerService.allScanners().map { ($0.id, $0.group) }
@@ -112,9 +114,176 @@ private func row(_ name: String, path: String, size: Int64,
         ("other.jsPackages", .otherCaches),
         ("other.localToolCaches", .otherCaches),
         ("other.libraryCaches", .otherCaches),
+        ("other.appCaches", .otherCaches),
+        ("other.xdgCache", .otherCaches),
+        ("other.electronCaches", .otherCaches),
+        ("big.downloads", .bigThings),
+        ("big.aiModels", .bigThings),
+        // Last of all, which is where the deck's interstitial and the "biggest first"
+        // ordering of the big things both expect to find it.
+        ("big.largeFiles", .bigThings),
     ]
     #expect(listed.map(\.0) == expected.map(\.0))
     #expect(listed.map(\.1) == expected.map(\.1))
+}
+
+/// The declaration the deck reads to decide whether a scanner is one card or one card each,
+/// checked **against the registry** so it cannot fall behind it.
+///
+/// Three scanners differ from the default, and each of them because its rows are unrelated
+/// to one another: a user may want `~/.cache/uv` gone and `~/.cache/pre-commit` kept, and
+/// a 7 GB installer in `~/Downloads` has nothing to do with the video beside it. Every
+/// other scanner's rows are one decision — all sixteen simulators, all twenty-two derived
+/// data folders — and one card is the question.
+@Test func exactlyThreeScannersAreDealtOneCardPerRow() {
+    let perItem = CleanerService.allScanners()
+        .filter { $0.deckDealing == .perItem }
+        .map(\.id)
+    #expect(perItem == ["other.xdgCache", "big.downloads", "big.aiModels"])
+    // Read back through the lookup as well, which is where the deck asks: a declaration the
+    // registry has and `scannerInfo` drops would deal these as one all-or-nothing card.
+    for scanner in CleanerService.allScanners() {
+        #expect(CleanerService.scanner(withID: scanner.id)?.dealing == scanner.deckDealing,
+                "\(scanner.id)")
+    }
+    // Rule 4: a fixture where everything agreed could not tell the two values apart.
+    #expect(CleanerService.scanner(withID: "xcode.derivedData")?.dealing == .grouped)
+    #expect(CleanerService.scanner(withID: "big.downloads")?.dealing == .perItem)
+}
+
+/// **Exactly two scanners are dealt no card at all**, and both of them also refuse to be
+/// ticked. The two halves are independent and both are needed.
+///
+/// `DeckDealing.mentionOnly` decides what the window *draws* — no card, a line on the end
+/// card instead — and nothing that deletes has ever heard of it. What keeps these rows out
+/// of `ScanResult.defaultSelection`, `CleanerService.cleanDefault`, `devcleaner clean` and
+/// the status panel's amount is `CleanupItem.startsUnticked`, on every row, which is why it
+/// is asserted here beside the declaration rather than only in the scanner's own file: a
+/// scanner that declared one without the other would either be silently cleanable or
+/// silently invisible.
+@Test func exactlyTwoScannersAreMentionedRatherThanDealtAndNeitherIsEverTicked() async {
+    let mentionOnly = CleanerService.allScanners()
+        .filter { $0.deckDealing == .mentionOnly }
+        .map(\.id)
+    #expect(mentionOnly == ["other.appCaches", "other.electronCaches"])
+    for id in mentionOnly {
+        #expect(CleanerService.scanner(withID: id)?.dealing == .mentionOnly, "\(id)")
+    }
+
+    // And the rows themselves, from the real scanners over real fixtures.
+    let temp = TempDir()
+    let brave = temp.makeDirectory("Library/Caches/BraveSoftware")
+    let slack = temp.makeDirectory("Library/Application Support/Slack/Cache")
+    let context = ScanContext(
+        settings: .makeDefault(home: temp.path), protection: .empty, projects: [],
+        devices: .empty, home: temp.path, androidSDKPath: temp.path + "/sdk",
+        sizeMeasurer: FixedSizeMeasurer([brave: 3_200_000_000, slack: 1_300_000_000]),
+        runner: FakeProcessRunner(responses: [:]), fileManager: .default,
+        now: Date(timeIntervalSince1970: 1_786_000_000))
+    let rows = await AppCacheScanner().scan(context)
+        + ElectronCacheScanner().scan(context)
+
+    #expect(!rows.isEmpty)
+    #expect(rows.allSatisfy { $0.startsUnticked })
+    #expect(rows.allSatisfy { !$0.selectedByDefault })
+    // Deletable all the same, which is the distinction: nothing is *protecting* these, the
+    // app has simply decided not to be the thing that removes them.
+    #expect(rows.allSatisfy { $0.isDeletable })
+}
+
+/// **Exactly one scanner is dealt as a checklist**, and like every other big thing its rows
+/// are never ticked. The two halves are independent and both are needed.
+///
+/// `DeckDealing.checklist` decides what the window *draws* — one card, a checkbox per row —
+/// and nothing that deletes has ever heard of it. What keeps these rows out of
+/// `ScanResult.defaultSelection`, `CleanerService.cleanDefault`, `devcleaner clean` and the
+/// status panel's amount is `CleanupItem.startsUnticked` on every row, which is why it is
+/// asserted here beside the declaration: the page's ticks start all-on, and a scanner that
+/// declared the card without the engine-level rule would hand a default clean somebody's
+/// films the first time anything called `cleanDefault`.
+@Test func exactlyOneScannerIsDealtAsAChecklistAndItsRowsAreNeverTicked() async {
+    let checklists = CleanerService.allScanners()
+        .filter { $0.deckDealing == .checklist }
+        .map(\.id)
+    #expect(checklists == ["big.largeFiles"])
+    // Read back through the lookup as well, which is where the deck asks: a declaration the
+    // registry has and `scannerInfo` drops would deal fifty unrelated files as one
+    // all-or-nothing card with a button over the lot.
+    #expect(CleanerService.scanner(withID: "big.largeFiles")?.dealing == .checklist)
+    #expect(CleanerService.scanner(withID: "big.largeFiles")?.title == "Large files")
+
+    // And the rows themselves, from the real scanner over a real file.
+    let temp = TempDir()
+    let film = temp.makeFile("Documents/films/holiday.mov", bytes: 1_700_000_000)
+    let rows = await LargeFilesScanner().scan(ScanContext(
+        settings: .makeDefault(home: temp.path), protection: .empty, projects: [],
+        devices: .empty, home: temp.path, androidSDKPath: temp.path + "/sdk",
+        sizeMeasurer: FixedSizeMeasurer([:]),
+        runner: FakeProcessRunner(responses: [
+            commandKey("/usr/bin/mdfind",
+                       ["-onlyin", temp.path, LargeFilesScanner.spotlightQuery]):
+                ProcessResult(exitCode: 0, stdout: film, stderr: ""),
+        ]),
+        fileManager: .default, now: now))
+
+    #expect(!rows.isEmpty)
+    #expect(rows.allSatisfy { $0.startsUnticked })
+    #expect(rows.allSatisfy { !$0.selectedByDefault })
+    // Deletable all the same, which is the distinction: nothing is *protecting* these, the
+    // app simply refuses to be the thing that decides.
+    #expect(rows.allSatisfy { $0.isDeletable })
+}
+
+/// Every big-things scanner carries its identifier as a static, because the deck and the
+/// tests recognise those rows by it and the strings are also persisted in
+/// `Settings.alwaysSkipScannerIDs`.
+@Test func theBigThingsScannersCarryTheirIdentifiersAsStatics() {
+    #expect(DownloadsScanner.scannerID == "big.downloads")
+    #expect(DownloadsScanner().id == DownloadsScanner.scannerID)
+    #expect(AIModelScanner.scannerID == "big.aiModels")
+    #expect(AIModelScanner().id == AIModelScanner.scannerID)
+    #expect(LargeFilesScanner.scannerID == "big.largeFiles")
+    #expect(LargeFilesScanner().id == LargeFilesScanner.scannerID)
+    #expect(XDGCacheScanner.scannerID == "other.xdgCache")
+    #expect(XDGCacheScanner().id == XDGCacheScanner.scannerID)
+}
+
+/// The lookup the main window's tool cards are titled from, checked **against the registry**
+/// rather than against a list written here.
+///
+/// A card is one scanner, and its heading is that scanner's title — which a `ScanResult` row
+/// does not carry. Built from `allScanners()`, the lookup cannot fall behind the registry the
+/// way a hand-written list of fifteen fell behind `android.ndk`; this is the test that says
+/// so, entry by entry.
+@Test func everyRegisteredScannerCanBeLookedUpByItsID() {
+    for scanner in CleanerService.allScanners() {
+        let info = CleanerService.scanner(withID: scanner.id)
+        #expect(info?.id == scanner.id, "\(scanner.id)")
+        #expect(info?.title == scanner.title, "\(scanner.id)")
+        #expect(info?.group == scanner.group, "\(scanner.id)")
+    }
+    #expect(CleanerService.scannerInfo.count == CleanerService.allScanners().count)
+    // Two of the titles in full, so a reworded scanner shows up as a failing card heading
+    // rather than silently changing what the window says.
+    #expect(CleanerService.scanner(withID: "xcode.derivedData")?.title == "Derived data")
+    #expect(CleanerService.scanner(withID: "ios.simulators")?.title == "iOS simulators")
+}
+
+/// `nil`, not a guess. A `cache.json` written by a build with a scanner this one does not
+/// have is read back rather than discarded, so an interface can be handed an identifier that
+/// is in no registry — and it has to answer with something visible instead of dropping the
+/// rows.
+@Test func anUnknownScannerIdentifierIsNotInTheLookup() {
+    #expect(CleanerService.scanner(withID: "xcode.somethingNewer") == nil)
+    #expect(CleanerService.scanner(withID: "") == nil)
+}
+
+/// The derived data scanner's identifier is a static, because the deck reads it to decide
+/// whether to shorten a row's name, and the string is also persisted in
+/// `Settings.alwaysSkipScannerIDs`.
+@Test func theDerivedDataScannerCarriesItsIdentifierAsAStatic() {
+    #expect(DerivedDataScanner.scannerID == "xcode.derivedData")
+    #expect(DerivedDataScanner().id == DerivedDataScanner.scannerID)
 }
 
 @Test func noScannerIsRegisteredTwiceAndEveryOneHasATitle() {
@@ -162,7 +331,7 @@ private func row(_ name: String, path: String, size: Int64,
     let registered = Set(CleanerService.allScanners().map { String(describing: type(of: $0)) })
     // Sanity: the search found something at all, so a broken pattern cannot pass by
     // finding nothing and comparing two empty sets.
-    #expect(declared.count == 17)
+    #expect(declared.count == 23)
     #expect(declared.subtracting(registered).isEmpty,
             "these scanners exist but are not in CleanerService.allScanners()")
     #expect(registered.subtracting(declared).isEmpty)
@@ -247,6 +416,278 @@ private func row(_ name: String, path: String, size: Int64,
     #expect(!FileManager.default.fileExists(atPath: ndk))
     let entry = try #require(record.entries.first)
     #expect(entry.outcome == .trashed)
+}
+
+// MARK: - the large-files licence, end to end
+
+/// Over `LargeFileLicence.minimumBytes`, so a fixture only has to say "large".
+private let large: Int64 = 1_700_000_000
+
+/// A row shaped exactly as `LargeFilesScanner` shapes one, for a path of the caller's
+/// choosing.
+///
+/// Hand-built rather than scanned, because that is the thing under test: the deck hands
+/// `clean(items:)` a list of rows, and the licence has to be re-earned from **the row** —
+/// whatever produced it, however long ago, whatever is at that path now.
+private func largeFileRow(_ path: String, scanner: String = LargeFilesScanner.scannerID)
+    -> CleanupItem {
+    ScanHelpers.item(
+        scannerID: scanner, group: .bigThings, path: path,
+        name: (path as NSString).lastPathComponent, sizeBytes: large,
+        risk: .irreplaceable, startsUnticked: true)
+}
+
+/// The path a row names after the scanner has canonicalised it — a `TempDir` lives under
+/// `/var/folders`, and `/var` is a symlink to `/private/var`.
+private func canonical(_ path: String) -> String {
+    PathGuard.canonicaliseKeepingLeaf(path) ?? path
+}
+
+/// **The licence works, and it is the only thing that admits one of these paths.**
+///
+/// The positive control is the discriminating half. `~/Documents` is under no
+/// `PathGuard.forRun` root and never will be — that is the whole design of this feature —
+/// so the film is removed *only* because its row earned an exact path back, while every
+/// refusal below is the same guard with the same roots saying no. Without the film in the
+/// same run, a licence that granted nothing at all would pass every other assertion here.
+@Test func aLargeFileIsRemovedBecauseItsOwnRowEarnedTheLicenceAndNothingElse() async throws {
+    let temp = TempDir()
+    let film = temp.makeFile("Documents/films/lesson 26.mp4", bytes: large)
+    let service = try makeService(temp: temp, runner: RecordingProcessRunner())
+
+    let record = await service.clean(
+        items: [largeFileRow(film)], now: now, progress: { _ in })
+
+    #expect(!FileManager.default.fileExists(atPath: film))
+    let entry = try #require(record.entries.first)
+    #expect(entry.outcome == .trashed)
+    // The path the guard approved, which is the canonical one — the only string it is safe
+    // to act on.
+    #expect(entry.target == canonical(film))
+    #expect(record.trashedBytes == large)
+    #expect(record.failedCount == 0)
+    // And the home folder did not become a root on the way: the film's own sibling, which
+    // no row named, is still refused.
+    let sibling = temp.makeFile("Documents/films/keep this.mp4", bytes: large)
+    let second = await service.clean(
+        items: [largeFileRow(sibling, scanner: "projects.buildOutput")],
+        now: now, progress: { _ in })
+    #expect(FileManager.default.fileExists(atPath: sibling))
+    #expect(second.failedCount == 1)
+}
+
+/// **The rules that are about where the file is**, each one refused through the real
+/// service with the real guard.
+///
+/// One run, so the record itself says the licence is per file: the film in `~/Documents`
+/// goes, and the five rows beside it — every one of them naming a real file over the floor,
+/// every one of them handed over under this scanner's own identifier — fail. A licence
+/// derived from anything coarser than the single path would have taken at least one of them
+/// with it.
+@Test func theLicenceRefusesLibraryHiddenPackagedAndForeignPathsThroughAWholeClean()
+    async throws {
+    let temp = TempDir()
+    let outside = TempDir()
+
+    let film = temp.makeFile("Documents/films/lesson 26.mp4", bytes: large)
+    // `~/Library` is the machine's, not the user's — and `Application Support` is where
+    // this app's own `settings.json`, `cache.json` and run log live. Deliberately not a
+    // path under `Library/Caches`, which really is a `PathGuard.forRun` root for three
+    // other scanners: this test is about the licence, so it names somewhere no root covers.
+    let mail = temp.makeFile("Library/Mail/V10/big.mbox", bytes: large)
+    // A hidden component is somebody's tool state, and `~/.Trash` is a list of things the
+    // user has already thrown away.
+    let trashed = temp.makeFile(".Trash/already-thrown-away.mov", bytes: large)
+    // A frame inside a Photos library is not a file the user can answer about: removing it
+    // corrupts the library rather than freeing space they chose to give up.
+    let framed = temp.makeFile(
+        "Pictures/Photos Library.photoslibrary/originals/0/IMG.mov", bytes: large)
+    let payload = temp.makeFile(
+        "Applications/Dictation.app/Contents/Resources/model.bin", bytes: large)
+    // Not under this home at all. `mdfind` is told `-onlyin <home>` and still its output is
+    // untrusted, and a row is more untrusted than that.
+    let someoneElses = outside.makeFile("someone-elses.mov", bytes: large)
+
+    let refused = [mail, trashed, framed, payload, someoneElses]
+    let service = try makeService(temp: temp, runner: RecordingProcessRunner())
+
+    let record = await service.clean(
+        items: [largeFileRow(film)] + refused.map { largeFileRow($0) },
+        now: now, progress: { _ in })
+
+    #expect(!FileManager.default.fileExists(atPath: film))
+    for path in refused {
+        #expect(FileManager.default.fileExists(atPath: path), "\(path)")
+    }
+    #expect(record.failedCount == refused.count)
+    #expect(record.trashedBytes == large)
+    // Refused by the guard, in the guard's own words, rather than by something downstream
+    // that happened to fail. An exact allowance is the only thing that could have admitted
+    // any of these, and none of them earned one.
+    for entry in record.entries.dropFirst() {
+        #expect(entry.outcome == .failed, "\(entry.name)")
+        #expect(entry.reason?.contains("is not inside an allowed root") == true,
+                "\(entry.name)")
+    }
+}
+
+/// **The rules that are about what is at the path now.**
+///
+/// The scan is minutes old by the time anybody presses a button, and this is the case the
+/// per-file licence exists for: the row still says "1.7 GB film", and on disk the path is a
+/// directory, or a symlink into somebody's photo library, or a file that has been truncated
+/// to nothing. Each swap happens **after** the row is built, so the row is exactly what an
+/// honest scan produced and the refusal can only come from re-reading the disk.
+@Test func theLicenceIsReEarnedAgainstTheDiskSoASwappedOrShrunkPathIsRefused() async throws {
+    let temp = TempDir()
+    let keeper = temp.makeFile("Pictures/wedding.mov", bytes: large)
+
+    // Three honest rows, built while three real files over the floor were there.
+    let swappedForADirectory = temp.makeFile("Documents/a.mov", bytes: large)
+    let swappedForALink = temp.makeFile("Documents/b.mov", bytes: large)
+    let shrunk = temp.makeFile("Documents/c.mov", bytes: large)
+    let survivor = temp.makeFile("Documents/d.mov", bytes: large)
+    let rows = [swappedForADirectory, swappedForALink, shrunk, survivor]
+        .map { largeFileRow($0) }
+
+    // A directory: removing it would be a whole tree gone for a row that claimed to be one
+    // file.
+    try FileManager.default.removeItem(atPath: swappedForADirectory)
+    temp.makeFile("Documents/a.mov/inside/keep.txt", contents: "kept")
+    // A symlink: its size is its target's, while trashing it frees nothing at all — and the
+    // guard accepts a symlink at the leaf, so the licence is the only thing standing
+    // between this row and the wedding video.
+    try FileManager.default.removeItem(atPath: swappedForALink)
+    temp.makeSymlink("Documents/b.mov", to: keeper)
+    // Truncated since the scan: the row is describing something that no longer exists.
+    guard truncate(shrunk, 12) == 0 else { fatalError("could not shrink \(shrunk)") }
+
+    let service = try makeService(temp: temp, runner: RecordingProcessRunner())
+    let record = await service.clean(items: rows, now: now, progress: { _ in })
+
+    #expect(FileManager.default.fileExists(atPath: swappedForADirectory + "/inside/keep.txt"))
+    // The link is still a link, and what it points at is untouched.
+    #expect(FileManager.default.fileExists(atPath: swappedForALink))
+    #expect(FileManager.default.fileExists(atPath: keeper))
+    #expect(FileManager.default.fileExists(atPath: shrunk))
+    // The one row that still describes what is there went, so this is not a clean that
+    // refused everything.
+    #expect(!FileManager.default.fileExists(atPath: survivor))
+    #expect(record.failedCount == 3)
+    #expect(record.trashedBytes == large)
+}
+
+/// A row earns the licence **only** under this scanner's identifier.
+///
+/// Both rows name the same real file over the floor in the same place, and the only thing
+/// that differs is `scannerID`. A forged row naming somebody's `~/Documents` under
+/// `projects.buildOutput` is refused exactly as it was before this feature existed — the
+/// licence added one path for one row and nothing about the identifier is cosmetic.
+@Test func onlyTheLargeFilesScannersOwnIdentifierEarnsTheLicenceInAWholeClean() async throws {
+    let temp = TempDir()
+    let taxes = temp.makeFile("Documents/taxes 2025.pdf", bytes: large)
+    let service = try makeService(temp: temp, runner: RecordingProcessRunner())
+
+    let forged = await service.clean(
+        items: [largeFileRow(taxes, scanner: "projects.buildOutput")],
+        now: now, progress: { _ in })
+
+    #expect(FileManager.default.fileExists(atPath: taxes))
+    #expect(forged.failedCount == 1)
+    #expect(forged.entries.first?.reason?.contains("is not inside an allowed root") == true)
+
+    // The same path, the same run guard, this scanner's identifier: removed. Which is what
+    // says the refusal above was about the identifier and not about the path.
+    let honest = await service.clean(items: [largeFileRow(taxes)], now: now, progress: { _ in })
+    #expect(!FileManager.default.fileExists(atPath: taxes))
+    #expect(honest.failedCount == 0)
+}
+
+/// One of the user's own files goes to the Trash **whatever the setting says**, and it goes
+/// under its own name.
+///
+/// `RiskLevel.irreplaceable` is what overrides permanent mode: there would be nothing
+/// anywhere to get a film back from, so the row is trashed or it fails, and it never falls
+/// through to a removal the user did not agree to.
+///
+/// **The name is the less obvious half, and the rename really is a live possibility for
+/// these rows.** `ProjectRowPath.trashName` asks only that the path end in `/<name>`, which
+/// is true of every file — so it answers "films – lesson 26.mp4" for this one, and a row
+/// renamed on its way out would land in the Trash as something the user cannot recognise as
+/// theirs. Two independent things refuse it, and the assertion below is worth reading as
+/// covering both:
+///
+/// 1. `Executor.visibleSibling` is scoped to `projects.buildOutput`. That rename exists
+///    because a Trash full of folders called `.build` is unreadable; a film already has the
+///    name its owner gave it.
+/// 2. The licence grants **exact paths only**. The sibling the rename would move to is not
+///    one of them and sits under no root, so `visibleSibling`'s own `validate` refuses it
+///    and returns "leave it alone" — which is the rule that still holds if anybody ever
+///    widens the first one.
+@Test func aLargeFileIsTrashedUnderItsOwnNameEvenWhenTheSettingSaysPermanent() async throws {
+    let temp = TempDir()
+    let film = temp.makeFile("Documents/films/lesson 26.mp4", bytes: large)
+    let service = try makeService(
+        temp: temp, runner: RecordingProcessRunner(),
+        settings: { $0.moveToTrash = false })
+
+    let record = await service.clean(items: [largeFileRow(film)], now: now, progress: { _ in })
+
+    let entry = try #require(record.entries.first)
+    #expect(entry.outcome == .trashed)
+    #expect(entry.isRestorable)
+    #expect(record.trashedBytes == large)
+    #expect(record.permanentlyDeletedBytes == 0)
+    // The name the rename would have used, so this test fails rather than passing vacuously
+    // if `trashName` ever stops answering for a plain file — which is what would make the
+    // assertion below true for the wrong reason.
+    #expect(ProjectRowPath.trashName(of: canonical(film), named: "lesson 26.mp4")
+            == "films – lesson 26.mp4")
+    // `trashedTo` is where the user will be looking, so it has to be the name they know.
+    #expect((entry.trashedTo as NSString?)?.lastPathComponent == "lesson 26.mp4")
+    // And the warning the interface shows before the run says so, in permanent mode too.
+    #expect(service.warnings(for: [largeFileRow(film)])
+            == [CleanerService.Warning.trashingDoesNotFreeSpaceYet])
+}
+
+/// **No default route ever includes one of these rows**, checked over a real scan.
+///
+/// Every route in the app that removes something without the user pointing at a row reads
+/// `ScanResult.defaultSelection`: `cleanDefault`, which is the only list `devcleaner clean`
+/// and `clean --dry-run` ever build, and the status panel's amount, which is
+/// `reclaimableBytes`. The ticks the user sees on the checklist page are the window's own,
+/// and the engine's answer to all of these is the same: not ticked.
+@Test func noDefaultRouteEverTicksALargeFileEndToEnd() async throws {
+    let temp = TempDir()
+    let film = temp.makeFile("Documents/films/lesson 26.mp4", bytes: 582_000_000)
+    let gradle = temp.makeDirectory(".gradle/caches/modules-2")
+    let service = try makeService(
+        temp: temp,
+        runner: FakeProcessRunner(responses: [
+            commandKey("/usr/bin/mdfind",
+                       ["-onlyin", temp.path, LargeFilesScanner.spotlightQuery]):
+                ProcessResult(exitCode: 0, stdout: film, stderr: ""),
+        ]),
+        sizes: [gradle: 1_000_000])
+
+    let scan = await service.scan(now: now)
+
+    let rows = scan.items.filter { $0.scannerID == "big.largeFiles" }
+    #expect(rows.map(\.name) == ["lesson 26.mp4"])
+    #expect(rows.allSatisfy { $0.isDeletable })
+    // The headline is the Gradle cache alone, and so is the group total: a status panel that
+    // added the film in would be offering to move it.
+    #expect(scan.reclaimableBytes == 1_000_000)
+    #expect(scan.reclaimableBytes(in: .bigThings) == 0)
+    #expect(scan.untickedDeletableBytes == 582_000_000)
+    #expect(scan.defaultSelection.allSatisfy { $0.scannerID != "big.largeFiles" })
+
+    // And the route itself, not just the list it reads: the film is still there afterwards.
+    let record = await service.cleanDefault(scan, now: now, progress: { _ in })
+    #expect(FileManager.default.fileExists(atPath: film))
+    #expect(!FileManager.default.fileExists(atPath: gradle))
+    #expect(record.trashedBytes == 1_000_000)
+    #expect(!record.entries.contains { $0.target.contains("lesson 26.mp4") })
 }
 
 // MARK: - the default clean
@@ -689,9 +1130,11 @@ private func row(_ name: String, path: String, size: Int64,
     let projectItems = result.items(in: .projects)
     #expect(projectItems.count == 2)
     // And the protection rules then ran on what it found, which is the half that costs
-    // data: with no project discovered, nothing is protected.
-    #expect(projectItems.first { $0.name == "active" }?.isDeletable == false)
-    #expect(projectItems.first { $0.detail == "stale" }?.isDeletable == true)
+    // data: with no project discovered, nothing is held back at all, so both rows would
+    // have come back ticked.
+    #expect(projectItems.first { $0.detail?.hasPrefix("active") == true }?.selectedByDefault
+            == false)
+    #expect(projectItems.first { $0.detail == "stale" }?.selectedByDefault == true)
 }
 
 /// The same root reaching `PathGuard.forRun`. An unexpanded `~/dev` cannot be resolved, so
@@ -765,7 +1208,19 @@ private func row(_ name: String, path: String, size: Int64,
 
 // MARK: - the brief's end-to-end cases
 
-@Test func scanProtectsARecentlyChangedProjectEndToEnd() async throws {
+/// The whole rule, end to end through the real `ActivityInspector` and the real resolver:
+/// a project touched yesterday is **offered unticked** and one untouched for two hundred
+/// days is ticked.
+///
+/// This test used to assert the active project was not deletable at all. It was changed
+/// deliberately, and the reason is in `ProjectBuildOutputScanner`'s own doc comment: on a
+/// real dev machine every project holding build output came back "changed in the last 14
+/// days", so a window that shows one project at a time and asks about it had nothing left
+/// to show. What has to stay true is the number below — a default clean still takes
+/// 2 GB and not 5 — because that is the promise the headline makes and the list
+/// `cleanDefault` acts on.
+@Test func scanOffersARecentlyChangedProjectsFoldersUntickedRatherThanWithholdingThem()
+    async throws {
     let temp = TempDir()
     temp.makeFile("dev/active/pubspec.yaml", modified: now.addingTimeInterval(-86_400))
     let activeBuild = temp.makeDirectory("dev/active/build")
@@ -778,13 +1233,80 @@ private func row(_ name: String, path: String, size: Int64,
     ).scan(now: now)
 
     let projectItems = result.items(in: .projects)
-    #expect(projectItems.first { $0.name == "active" }?.isDeletable == false)
-    #expect(projectItems.first { $0.detail == "stale" }?.isDeletable == true)
+    #expect(projectItems.count == 2)
+    let active = try #require(projectItems.first { $0.detail?.hasPrefix("active") == true })
+    #expect(active.isDeletable)
+    #expect(!active.selectedByDefault)
+    #expect(active.untickedReason == .recentActivity(days: 14))
+    #expect(active.detail == "active · changed in the last 14 days")
+    #expect(active.sizeBytes == 3_000_000_000)
+    #expect(active.method == .removePath(activeBuild))
+
+    let stale = try #require(projectItems.first { $0.detail == "stale" })
+    #expect(stale.selectedByDefault)
+    #expect(stale.method == .removePath(staleBuild))
+
+    // The two numbers the listing prints, and the 3 GB is in exactly one of them.
     #expect(result.reclaimableBytes == 2_000_000_000)
-    // The protected project keeps its row, carrying what it is holding, so "where did my
-    // 3 GB go?" has an answer.
-    let kept = try #require(projectItems.first { $0.name == "active" })
-    #expect(kept.sizeBytes == 3_000_000_000)
+    #expect(result.untickedDeletableBytes == 3_000_000_000)
+}
+
+/// The tick rule, at the one place it is destructive: a default clean leaves a recently
+/// changed project's folders on the disk.
+///
+/// `cleanDefault` re-derives its list from `ScanResult.defaultSelection` inside the engine,
+/// so this is the test that says the softening above did not reach the blind one-click
+/// path. It is the same shape as `aDefaultCleanLeavesTheNDKOnDiskAndTakesTheTickedRow`,
+/// and for the same reason.
+@Test func aDefaultCleanLeavesARecentlyChangedProjectsFoldersOnDisk() async throws {
+    let temp = TempDir()
+    temp.makeFile("dev/active/pubspec.yaml", modified: now.addingTimeInterval(-86_400))
+    let activeBuild = temp.makeDirectory("dev/active/build")
+    temp.makeFile("dev/stale/pubspec.yaml", modified: now.addingTimeInterval(-86_400 * 200))
+    let staleBuild = temp.makeDirectory("dev/stale/build")
+    let service = try makeService(
+        temp: temp, runner: FakeProcessRunner(responses: [:]),
+        sizes: [activeBuild: 3_000_000_000, staleBuild: 2_000_000_000])
+    let result = await service.scan(now: now)
+
+    let record = await service.cleanDefault(result, now: now, progress: { _ in })
+
+    // By identifier rather than by `target`, which is the **canonicalised** path the guard
+    // approved — under a `TempDir` that is the `/private/var/…` spelling of the same
+    // directory, and comparing the two strings tests `realpath` rather than the tick rule.
+    #expect(record.entries.map(\.itemID) == ["projects.buildOutput|\(staleBuild)"])
+    #expect(record.trashedBytes == 2_000_000_000)
+    #expect(FileManager.default.fileExists(atPath: activeBuild))
+    #expect(!FileManager.default.fileExists(atPath: staleBuild))
+
+    // And ticking it by hand is still allowed, which is what the deck's Clean up button
+    // does: handed the row explicitly, the engine removes it.
+    let active = try #require(result.items.first { $0.method == .removePath(activeBuild) })
+    let asked = await service.clean(items: [active], now: now, progress: { _ in })
+    #expect(asked.entries.map(\.itemID) == [active.id])
+    #expect(asked.trashedBytes == 3_000_000_000)
+    #expect(!FileManager.default.fileExists(atPath: activeBuild))
+}
+
+/// The composition root already knows when each project last changed — it is what
+/// `ProtectionResolver` decides protection on — and until now it threw the answer away
+/// once protection was resolved. The deck's "last changed 4 months ago" comes from this
+/// wiring, and only an end-to-end scan can see it: the scanner reads
+/// `ScanContext.activity`, and a `makeContext` that never fills it in leaves every row
+/// dated `nil` with nothing in the scanner's own tests to notice.
+@Test func theScanCarriesWhenEachProjectLastChangedOntoItsRows() async throws {
+    let temp = TempDir()
+    let changed = now.addingTimeInterval(-86_400 * 200)
+    temp.makeFile("dev/stale/pubspec.yaml", modified: changed)
+    let build = temp.makeDirectory("dev/stale/build")
+
+    let result = try await makeService(
+        temp: temp, runner: FakeProcessRunner(responses: [:]),
+        sizes: [build: 2_000_000_000]
+    ).scan(now: now)
+
+    let row = try #require(result.items(in: .projects).first { $0.detail == "stale" })
+    #expect(row.lastUsed == changed)
 }
 
 @Test func skippedScannerIsHonouredEndToEnd() async throws {
@@ -1094,7 +1616,8 @@ private final class Reported: @unchecked Sendable {
     let item = row("ndk", path: "/tmp/ndk", size: 5, startsUnticked: true, sizeMayBeShared: true)
     let data = try JSONEncoder().encode(item)
     var object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-    for key in ["startsUnticked", "sizeMayBeShared", "detail", "lastUsed", "protection"] {
+    for key in ["startsUnticked", "sizeMayBeShared", "detail", "lastUsed", "protection",
+                "untickedReason"] {
         object.removeValue(forKey: key)
     }
     let decoded = try JSONDecoder()
@@ -1102,9 +1625,29 @@ private final class Reported: @unchecked Sendable {
 
     #expect(!decoded.startsUnticked)
     #expect(!decoded.sizeMayBeShared)
+    #expect(decoded.untickedReason == nil)
     #expect(decoded.selectedByDefault)
     #expect(decoded.sizeBytes == 5)
     #expect(decoded.method == .removePath("/tmp/ndk"))
+}
+
+/// `untickedReason` survives a cache round trip, because the cache is what the app opens on:
+/// lost in the write, the very next launch would deal a card for a project the user is
+/// working in with no caution line on it and nothing saying why there should be one.
+@Test func theUntickedReasonSurvivesTheRoundTrip() throws {
+    let item = ScanHelpers.item(
+        scannerID: "projects.buildOutput", group: .projects,
+        path: "/tmp/active/.build", name: ".build", sizeBytes: 3_300_000_000,
+        startsUnticked: true, untickedReason: .recentActivity(days: 14))
+
+    let decoded = try JSONDecoder().decode(
+        CleanupItem.self, from: try JSONEncoder().encode(item))
+
+    #expect(decoded.untickedReason == .recentActivity(days: 14))
+    #expect(decoded.startsUnticked)
+    #expect(!decoded.selectedByDefault)
+    #expect(decoded.isDeletable)
+    #expect(decoded == item)
 }
 
 @Test func sizeMayBeSharedSurvivesTheRoundTrip() throws {
@@ -1113,6 +1656,71 @@ private final class Reported: @unchecked Sendable {
         CleanupItem.self, from: try JSONEncoder().encode(item))
     #expect(decoded.sizeMayBeShared)
     #expect(decoded == item)
+}
+
+/// A `cache.json` holding the cases this wave added loads in this build, whole.
+///
+/// `GroupID`, `RiskLevel` and `ProtectionReason` are all `Codable`, and a cached scan is
+/// read back on the very next launch — so the first thing to check about a new case is that
+/// the document it produces is one this build can read. If it were not, the rows would be
+/// dropped by the lenient path and the window would open having quietly forgotten 49 GB it
+/// had just measured.
+@Test func aCachedScanHoldingTheNewGroupRiskAndProtectionLoadsInThisBuild() throws {
+    let download = CleanupItem(
+        id: "big.downloads|/tmp/Xcode.xip", scannerID: "big.downloads", group: .bigThings,
+        name: "Xcode.xip", detail: "An installer. You can usually download it again.",
+        sizeBytes: 7_000_000_000, lastUsed: now, risk: .irreplaceable, protection: nil,
+        method: .removePath("/tmp/Xcode.xip"), startsUnticked: true)
+    let keptSupport = ScanHelpers.item(
+        scannerID: "xcode.deviceSupport", group: .xcodeAndIOS,
+        path: "/tmp/iPhone17,2 27.0 (24A435)", name: "iOS iPhone17,2 27.0 (24A435)",
+        sizeBytes: 7_000_000_000, risk: .elevated, protection: .newestDeviceSupport)
+    let full = ScanResult(
+        items: [download, keptSupport], generatedAt: now, availableBytes: 42,
+        skippedScannerIDs: [])
+
+    let decoded = try JSONDecoder().decode(
+        ScanResult.self, from: try JSONEncoder().encode(full))
+
+    #expect(decoded.items.count == 2)
+    #expect(decoded.items == [download, keptSupport])
+    #expect(decoded.items(in: .bigThings).map(\.risk) == [.irreplaceable])
+    #expect(decoded.items.compactMap(\.protection) == [.newestDeviceSupport])
+    // And the tick rule survives the round trip, which is the half that matters: a big
+    // thing that came back ticked would be in the very next default clean.
+    #expect(decoded.defaultSelection.isEmpty)
+    #expect(decoded.reclaimableBytes == 0)
+}
+
+/// The other direction, which is the one the lenient decode exists for: a document written
+/// by a **newer** build, holding a group, a risk or a protection reason this one has never
+/// heard of. Each unknown costs its own row and nothing else.
+@Test func aCachedScanFromANewerBuildStillCostsOnlyTheRowsThisBuildCannotRead() throws {
+    let good = row("uv", path: "/tmp/uv", size: 1_100_000_000, scanner: "other.xdgCache")
+    let full = ScanResult(items: [
+        row("future", path: "/tmp/future", size: 900_000_000),
+        good,
+        row("alsoFuture", path: "/tmp/also", size: 800_000_000),
+    ], generatedAt: now, availableBytes: 0, skippedScannerIDs: [])
+    let data = try JSONEncoder().encode(full)
+    var object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    var rows = try #require(object["items"] as? [[String: Any]])
+    #expect(rows.count == 3)
+    // A group and a risk from a build that has not been written yet.
+    rows[0]["group"] = "somethingNewerStill"
+    rows[2]["risk"] = "unrecoverable"
+    object["items"] = rows
+
+    let decoded = try JSONDecoder()
+        .decode(ScanResult.self, from: JSONSerialization.data(withJSONObject: object))
+
+    #expect(decoded.items.map(\.name) == ["uv"])
+    #expect(decoded.reclaimableBytes == 1_100_000_000)
+    // The case this build *does* know is not confused with an unknown one.
+    #expect(GroupID(rawValue: "bigThings") == .bigThings)
+    #expect(RiskLevel(rawValue: "irreplaceable") == .irreplaceable)
+    #expect(GroupID(rawValue: "somethingNewerStill") == nil)
+    #expect(RiskLevel(rawValue: "unrecoverable") == nil)
 }
 
 /// One unreadable row costs that row, not the whole cached scan.

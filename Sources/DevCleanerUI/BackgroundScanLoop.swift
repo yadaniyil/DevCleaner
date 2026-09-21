@@ -198,7 +198,7 @@ public final class BackgroundScanLoop {
     /// forgotten — cannot contain an `await`, and `abandonScan()` is a call to an actor.
     /// Every `return` below is either an `abandonScan()` or the `finished(at:)` that
     /// replaces it. Leaving one out is the silent failure: the scheduler stays marked as
-    /// running, the app stops scanning, and the popover goes on showing an ageing result.
+    /// running, the app stops scanning, and both surfaces go on showing an ageing result.
     private func runOneScan() async -> ScanScheduler.Trigger? {
         guard model.startScan() else {
             // The scheduler agreed and the app did not — a clean is running. No finish time

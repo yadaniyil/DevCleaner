@@ -90,7 +90,7 @@ public struct CleanerService: @unchecked Sendable {
 
     // MARK: - the registry
 
-    /// **Every scanner that exists**, in the order the popover lists them: group by group,
+    /// **Every scanner that exists**, in the order the listing prints them: group by group,
     /// following `GroupID.allCases`.
     ///
     /// This list is the registry, and a scanner missing from it does not run at all. Worse
@@ -116,13 +116,80 @@ public struct CleanerService: @unchecked Sendable {
             ProjectBuildOutputScanner(),
             // Other caches
             CocoaPodsScanner(), JSPackageCacheScanner(), LocalToolCacheScanner(),
-            LibraryCachesScanner(),
+            LibraryCachesScanner(), AppCacheScanner(), XDGCacheScanner(),
+            ElectronCacheScanner(),
+            // Big things — last, because `GroupID.bigThings` is last in `allCases` and
+            // this list follows that order group by group. Nothing in this group is ever
+            // ticked; see `RiskLevel.irreplaceable`.
+            DownloadsScanner(), AIModelScanner(), LargeFilesScanner(),
         ]
     }
 
     /// The identifiers of `allScanners()`, in the same order. This is the list a settings
     /// screen offers as switches, and the set `Settings.alwaysSkipScannerIDs` draws from.
     public static var scannerIDs: [String] { allScanners().map(\.id) }
+
+    /// What a scanner is called and where it belongs, for an interface holding nothing but
+    /// a `ScanResult`.
+    ///
+    /// A row carries `scannerID` and `group`; it does not carry the scanner's **title**.
+    /// The main window now deals one card per scanner, and the card's heading is that
+    /// scanner's name — "Derived data", "iOS simulators". Spelling those again in the
+    /// interface would be a second set of names for one set of things, and the two would
+    /// part company the day a scanner's own title is reworded. The group comes along for
+    /// the same reason: the card's eyebrow is `GroupID.title`, and reading it here rather
+    /// than off a row means a card cannot be filed under one group while its scanner says
+    /// another.
+    public struct ScannerInfo: Sendable, Equatable {
+        public let id: String
+        public let group: GroupID
+        public let title: String
+        /// Whether the deck deals this scanner's rows as one card or one card each.
+        ///
+        /// Here for the same reason the title and the group are: it is the scanner's own
+        /// declaration — see `DeckDealing` — and a `ScanResult` row does not carry it. The
+        /// deck reading a list of its own would be a second answer to the question, and the
+        /// day a scanner changed its mind the two would part company silently: rows that
+        /// belong on one card each would arrive on one all-or-nothing card, with a button
+        /// over a list of unrelated things.
+        ///
+        /// Defaults to `.grouped` so every existing construction of this type is unchanged
+        /// and means what it meant.
+        public let dealing: DeckDealing
+
+        public init(id: String, group: GroupID, title: String,
+                    dealing: DeckDealing = .grouped) {
+            self.id = id
+            self.group = group
+            self.title = title
+            self.dealing = dealing
+        }
+    }
+
+    /// Every scanner's name and group, keyed by identifier.
+    ///
+    /// Derived from `allScanners()` rather than written out, so a scanner added to the
+    /// registry is in here the same moment and cannot be forgotten the way `android.ndk`
+    /// was forgotten by a hand-written list. `everyRegisteredScannerCanBeLookedUpByItsID`
+    /// pins that from the other side.
+    public static let scannerInfo: [String: ScannerInfo] = Dictionary(
+        allScanners().map {
+            ($0.id, ScannerInfo(id: $0.id, group: $0.group, title: $0.title,
+                                dealing: $0.deckDealing))
+        },
+        // No registry has two scanners with one identifier — `noScannerIsRegisteredTwice
+        // AndEveryOneHasATitle` is what holds that — so this only decides what a broken
+        // registry would do, and keeping the first matches `ScanEngine`'s own rule.
+        uniquingKeysWith: { first, _ in first })
+
+    /// The scanner that produced a row, or `nil` for an identifier this build does not
+    /// know.
+    ///
+    /// `nil` is reachable through the cache: `cache.json` holds `scannerID` strings, and a
+    /// file written by a build with a scanner this one does not have is read back rather
+    /// than thrown away. A caller must answer that case with something visible — dropping
+    /// the rows would hide gigabytes with nothing on screen to say so.
+    public static func scanner(withID id: String) -> ScannerInfo? { scannerInfo[id] }
 
     // MARK: - settings
 
@@ -172,7 +239,14 @@ public struct CleanerService: @unchecked Sendable {
                 // what makes something deletable.
                 projectRoots: settings.projectRoots,
                 projectPaths: projects.map(\.path),
-                androidSDKPath: androidSDKPath),
+                androidSDKPath: androidSDKPath,
+                // The rows themselves, for the `big.largeFiles` licence and nothing else.
+                // A file of the user's own has no narrow root to sit under — the only
+                // alternative would be a licence over the home folder — so each row has to
+                // earn its own path back, here, against the disk as it is now rather than
+                // as the scan found it minutes ago. See `LargeFileLicence`.
+                items: items,
+                fileManager: fileManager),
             runner: runner, remover: remover, fileManager: fileManager,
             home: home, moveToTrash: settings.moveToTrash,
             // The same SDK the scan used. Without it the executor looks for `adb` and
@@ -258,7 +332,12 @@ public struct CleanerService: @unchecked Sendable {
         if executable.contains(where: { $0.method.path == nil }) {
             warnings.append(Warning.devicesAreRemovedPermanently)
         }
-        if moveToTrash, executable.contains(where: { $0.method.path != nil }) {
+        // `goesToTheTrash`, not `moveToTrash && path != nil`. In permanent mode an
+        // `.irreplaceable` row still goes to the Trash — the executor branches on the same
+        // function — so the sentence about the space coming back when you empty it is
+        // exactly as true there, and leaving it out would be the one screen where the
+        // engine and its own warning disagreed.
+        if executable.contains(where: { $0.goesToTheTrash(moveToTrash: moveToTrash) }) {
             warnings.append(Warning.trashingDoesNotFreeSpaceYet)
         }
         return warnings
@@ -287,7 +366,13 @@ public struct CleanerService: @unchecked Sendable {
             .resolve(projects: projects, activity: activity, devices: devices, now: now)
 
         return ScanContext(
-            settings: settings, protection: protection, projects: projects, devices: devices,
+            settings: settings, protection: protection, projects: projects,
+            // Carried on rather than dropped once protection is resolved. It is the same
+            // answer for both questions — which projects are being worked on, and when
+            // each one last changed — and re-deriving the second in an interface would
+            // walk 257 projects again for a number the scan already has.
+            activity: activity,
+            devices: devices,
             home: home, androidSDKPath: androidSDKPath,
             sizeMeasurer: sizeMeasurer, runner: runner, fileManager: fileManager, now: now,
             ignoredProjectRoots: ignoredRoots)

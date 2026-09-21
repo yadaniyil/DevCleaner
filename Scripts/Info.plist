@@ -27,5 +27,16 @@
     <string>AppIcon</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!-- Why DevCleaner asks for these folders. macOS shows the sentence in its own
+         permission prompt. The Large files page finds big files through Spotlight, and
+         Spotlight answers an app that has not been allowed into Documents or Desktop as
+         though those folders were empty, so without the grant the page silently misses
+         the biggest files on the disk. Downloads is the Downloads cards' folder. -->
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>DevCleaner looks for large files here so you can decide which ones to move to the Trash. It never removes anything without your click.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>DevCleaner looks for large files here so you can decide which ones to move to the Trash. It never removes anything without your click.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>DevCleaner lists large downloads so you can decide which ones to move to the Trash. It never removes anything without your click.</string>
 </dict>
 </plist>

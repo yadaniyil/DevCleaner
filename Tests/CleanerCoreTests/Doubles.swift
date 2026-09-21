@@ -89,6 +89,27 @@ final class TempDir: Sendable {
         return target.path
     }
 
+    /// A file whose **length** is `bytes`, written without spending the bytes.
+    ///
+    /// `truncate` makes a sparse file: `stat` reports the full length, which is the number
+    /// `LargeFileLicence` reads, Finder shows and Spotlight indexes, while almost no blocks
+    /// are allocated. Without it every fixture over `LargeFileLicence.minimumBytes` would
+    /// cost 200 MB of real writing, and the tests that need a dozen of them would write
+    /// gigabytes on every run.
+    @discardableResult
+    func makeFile(_ relative: String, bytes: Int64, modified: Date? = nil) -> String {
+        let path = makeFile(relative, contents: "")
+        guard truncate(path, off_t(bytes)) == 0 else {
+            fatalError("could not set the length of \(path)")
+        }
+        // After the truncation, which updates the modification date itself.
+        if let modified {
+            try! FileManager.default.setAttributes(
+                [.modificationDate: modified], ofItemAtPath: path)
+        }
+        return path
+    }
+
     @discardableResult
     func makeSymlink(_ relative: String, to destination: String) -> String {
         let target = url.appendingPathComponent(relative)

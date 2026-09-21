@@ -22,12 +22,14 @@ private func item(
     protection: ProtectionReason? = nil,
     method: DeletionMethod = .removePath("/Users/tester/Library/Caches/thing"),
     startsUnticked: Bool = false,
-    sizeMayBeShared: Bool = false
+    sizeMayBeShared: Bool = false,
+    untickedReason: ProtectionReason? = nil
 ) -> CleanupItem {
     CleanupItem(
         id: id, scannerID: scanner, group: group, name: name, detail: detail,
         sizeBytes: size, lastUsed: nil, risk: risk, protection: protection, method: method,
-        startsUnticked: startsUnticked, sizeMayBeShared: sizeMayBeShared)
+        startsUnticked: startsUnticked, sizeMayBeShared: sizeMayBeShared,
+        untickedReason: untickedReason)
 }
 
 private func scanResult(
@@ -70,6 +72,27 @@ private func runRecord(
     #expect(ByteText.short(0) == "0 KB")
 }
 
+/// The same size written in another size's scale, for the one place two of them are printed as
+/// a single quantity — the deck's "0.6 of 41.3 GB".
+///
+/// Same table as `short`, which is the whole reason it lives here: the divisors and the
+/// decimals have to be the ones the total above it was rounded by. A negative or a zero
+/// reference falls to kilobytes exactly as `short` does for such a size.
+@Test func formatsBytesInTheScaleAnotherSizeWouldUse() {
+    #expect(ByteText.short(582_000_000, inTheScaleOf: 41_300_000_000) == "0.6 GB")
+    #expect(ByteText.short(3_800_000_000, inTheScaleOf: 41_300_000_000) == "3.8 GB")
+    // Whole megabytes in a megabyte page, whole kilobytes in a kilobyte one: the decimals
+    // are the scale's, not the caller's.
+    #expect(ByteText.short(120_000_000, inTheScaleOf: 640_000_000) == "120 MB")
+    #expect(ByteText.short(4_000, inTheScaleOf: 40_000) == "4 KB")
+    // A reference in its own scale is the same string `short` would have written on its own.
+    #expect(ByteText.short(2_540_000_000, inTheScaleOf: 2_540_000_000)
+            == ByteText.short(2_540_000_000))
+    // Clamped in both arguments, like every other size in this app.
+    #expect(ByteText.short(-5_000_000, inTheScaleOf: 41_300_000_000) == "0.0 GB")
+    #expect(ByteText.short(916_000, inTheScaleOf: -1) == "916 KB")
+}
+
 @Test func formatsScanAge() {
     let now = Date(timeIntervalSince1970: 1_786_000_000)
     #expect(AgeText.since(now.addingTimeInterval(-30), now: now) == "just now")
@@ -107,6 +130,44 @@ private func runRecord(
     #expect(ReportText.mark(for: item(risk: .elevated, startsUnticked: true)) == " ")
     // Protected: shown, never ticked.
     #expect(ReportText.mark(for: item(protection: .pinnedProject)) == "-")
+    // Offered with a reason to think about it — an active project's build folder. Its box
+    // is empty like the NDK's, and emphatically **not** a `-`: the row is deletable, and
+    // `[-]` in the legend means "kept, cannot be removed", which would be a lie the user
+    // acts on by never ticking it.
+    #expect(ReportText.mark(
+        for: item(startsUnticked: true, untickedReason: .recentActivity(days: 14))) == " ")
+}
+
+/// The listing of a project the user is working in: offered, with its real size, box
+/// empty, and the reason printed beside the folder's name.
+///
+/// The `devcleaner` listing is one line per folder with a tick box two columns to the left,
+/// and it is the only surface with nowhere else to put the reason. Without it the user
+/// reads "946 MB .build" with an empty box and the same note the NDK gets — "a default
+/// clean leaves it alone" — and nothing anywhere says the project is one they were working
+/// in yesterday.
+@Test func theListingSaysWhyAnActiveProjectsFolderIsOfferedUnticked() {
+    let active = item(
+        id: "projects.buildOutput|/Users/tester/dev/Sample Game/.build",
+        scanner: "projects.buildOutput", group: .projects, name: ".build",
+        detail: "Sample Game · changed in the last 14 days",
+        size: 946_000_000,
+        method: .removePath("/Users/tester/dev/Sample Game/.build"),
+        startsUnticked: true, untickedReason: .recentActivity(days: 14))
+    let text = report.scan(scanResult([active]),
+                           now: Date(timeIntervalSince1970: 1_786_000_000), moveToTrash: true)
+
+    #expect(text.contains("  [ ]    946 MB  .build  "
+        + "(Sample Game · changed in the last 14 days)"))
+    #expect(!text.contains("  [x]    946 MB  .build"))
+    #expect(!text.contains("  [-]    946 MB  .build"))
+    // The note still reads right: it is offered, it is not ticked, and a default clean
+    // really does leave it alone.
+    #expect(text.contains(ReportText.untickedNote))
+    #expect(text.contains("Ticked by default:    up to 0 KB"))
+    #expect(text.contains("Offered, not ticked:  946 MB"))
+    // …and never as a kept row, which is the reading the old behaviour would have printed.
+    #expect(!text.contains("[kept:"))
 }
 
 @Test func theListingLeavesTheNDKUntickedAndSaysWhatThatMeans() {
@@ -798,4 +859,161 @@ private struct SilentScanner: CleanupScanner {
     #expect(text.contains("Nothing has been removed."))
     #expect(text.contains("Legend: [x] will be removed"))
     #expect(text.contains("Scanned:              just now"))
+}
+
+// MARK: - one of the user's own files, in the output
+
+/// A row as `big.downloads` builds one.
+private func bigThing(
+    id: String = "big.downloads|/Users/tester/Downloads/Xcode.xip",
+    name: String = "Xcode.xip", size: Int64 = 7_000_000_000
+) -> CleanupItem {
+    item(id: id, scanner: "big.downloads", group: .bigThings, name: name,
+         detail: DownloadsScanner.installerDetail, size: size, risk: .irreplaceable,
+         method: .removePath("/Users/tester/Downloads/Xcode.xip"), startsUnticked: true)
+}
+
+/// **The split bends in both directions**, and the CLI's plan is the screen that has to be
+/// right about it: in permanent mode a cache is removed outright and one of the user's own
+/// files still goes to the Trash, because the executor branches on the same function.
+@Test func inPermanentModeTheUsersOwnFileStillCountsAsGoingToTheTrash() {
+    let cache = item(id: "cache", name: "DerivedData", size: 40_000_000_000,
+                     method: .removePath("/Users/tester/Library/Developer/Xcode/DerivedData/App"))
+    let split = RemovalSplit(items: [cache, bigThing()], moveToTrash: false)
+
+    #expect(split.toTrash.map(\.name) == ["Xcode.xip"])
+    #expect(split.trashBytes == 7_000_000_000)
+    #expect(split.permanent.map(\.name) == ["DerivedData"])
+    #expect(split.permanentBytes == 40_000_000_000)
+    // The same rule, read directly.
+    #expect(bigThing().goesToTheTrash(moveToTrash: false))
+    #expect(bigThing().goesToTheTrash(moveToTrash: true))
+    #expect(!cache.goesToTheTrash(moveToTrash: false))
+}
+
+/// And the warning follows it. "The space comes back when you empty it" is exactly as true
+/// of a run in permanent mode that moved one of the user's files, and leaving it out would
+/// be the one screen where the engine and its own warning disagreed.
+@Test func theTrashWarningIsRaisedInPermanentModeByOneOfTheUsersOwnFiles() {
+    let cache = item(id: "cache", size: 40_000_000_000,
+                     method: .removePath("/Users/tester/Library/Caches/thing"))
+
+    #expect(CleanerService.warnings(for: [cache], moveToTrash: false).isEmpty)
+    #expect(CleanerService.warnings(for: [bigThing()], moveToTrash: false)
+            == [CleanerService.Warning.trashingDoesNotFreeSpaceYet])
+    // A protected row raises nothing: the executor refuses it, so a warning about where it
+    // would go is a claim the listing then contradicts.
+    let kept = item(id: "kept", scanner: "xcode.deviceSupport", group: .xcodeAndIOS,
+                    risk: .irreplaceable, protection: .newestDeviceSupport)
+    #expect(CleanerService.warnings(for: [kept], moveToTrash: false).isEmpty)
+}
+
+/// The listing has to print the new group and the new risk sensibly, because `devcleaner
+/// scan` is the only place a user can read the whole picture at once.
+@Test func theListingPrintsTheBigThingsGroupAndSaysWhatTheRowIs() {
+    let cache = item(id: "cache", name: "DerivedData", size: 40_000_000_000,
+                     method: .removePath("/Users/tester/Library/Developer/Xcode/DerivedData/App"))
+    let text = report.scan(scanResult([cache, bigThing()]),
+                           now: Date(timeIntervalSince1970: 1_786_000_000), moveToTrash: true)
+
+    #expect(text.contains("Big things  —  0 KB ticked, 1 row"))
+    #expect(text.contains("Xcode.xip"))
+    // The box is empty, because nothing here is ticked, and the two notes say both halves of
+    // the truth: nothing brings it back, and it is not deleted outright either.
+    #expect(text.contains("[ ]    7.0 GB  Xcode.xip  (An installer."))
+    #expect(text.contains(ReportText.irreplaceableNote))
+    #expect(text.contains(ReportText.untickedNote))
+    #expect(text.contains("Offered, not ticked:  7.0 GB"))
+    #expect(text.contains("Ticked by default:    up to 40.0 GB"))
+}
+
+/// The note is guarded like the permanence note: a protected device support folder is never
+/// removed, so a sentence about where it would go is a claim the `[-]` beside it contradicts.
+@Test func aKeptRowNeverCarriesTheNoteAboutWhereItWouldGo() {
+    let kept = item(id: "kept", scanner: "xcode.deviceSupport", group: .xcodeAndIOS,
+                    name: "iOS iPhone17,2 27.0 (24A435)", size: 7_000_000_000,
+                    risk: .irreplaceable, protection: .newestDeviceSupport,
+                    method: .removePath("/Users/tester/Library/Developer/Xcode/x"))
+
+    #expect(ReportText.mark(for: kept) == "-")
+    #expect(!report.targetLine(kept).contains(ReportText.irreplaceableNote))
+    #expect(report.targetLine(bigThing()).contains(ReportText.irreplaceableNote))
+}
+
+/// `mark` reads from `selectedByDefault` and the legend's "higher risk" glyph now covers
+/// `.irreplaceable` as well as `.elevated`, so no row that is not plainly safe is ever
+/// marked with the plain `x`.
+@Test func theBoxGlyphNeverMarksAnythingButAPlainlySafeRowWithAnX() {
+    let safe = item(id: "safe")
+    let elevated = item(id: "elevated", risk: .elevated)
+    // Reachable only by construction — every `.irreplaceable` row a committed scanner
+    // builds is unticked — and this is the spelling that stays right if one ever is not.
+    let tickedIrreplaceable = item(id: "odd", risk: .irreplaceable)
+
+    #expect(ReportText.mark(for: safe) == "x")
+    #expect(ReportText.mark(for: elevated) == "!")
+    #expect(ReportText.mark(for: tickedIrreplaceable) == "!")
+    #expect(ReportText.mark(for: bigThing()) == " ")
+}
+
+// MARK: - large files in the listing
+
+/// A row as `LargeFilesScanner` builds one: the file's name, and the folder it is in.
+private func largeFile(
+    name: String = "scan.pdf", folder: String = "Documents/archive/scans/batch-a/current",
+    size: Int64 = 1_200_000_000
+) -> CleanupItem {
+    let path = testHome + "/" + folder + "/" + name
+    return item(id: "big.largeFiles|" + path, scanner: "big.largeFiles", group: .bigThings,
+                name: name, detail: "~/" + folder, size: size, risk: .irreplaceable,
+                method: .removePath(path), startsUnticked: true)
+}
+
+/// **`devcleaner scan` is the only place a user can read the whole picture at once**, and
+/// these rows are the ones it has to be most careful about: they are the user's own files,
+/// they are offered, and nothing on any default route will touch them.
+///
+/// The folder is what the listing has to print. Sixteen sibling folders on the user's Mac
+/// each hold a `scan.pdf`, so a listing that printed sixteen identical names and sizes would
+/// be unreadable — the abbreviated parent in the detail column and the full target on the
+/// line below are between them what tells them apart.
+@Test func theListingPrintsALargeFileAsOfferedNotTickedWithTheFolderItIsIn() {
+    let cache = item(id: "cache", name: "DerivedData", size: 40_000_000_000,
+                     method: .removePath("/Users/tester/Library/Developer/Xcode/DerivedData/App"))
+    let text = report.scan(scanResult([cache, largeFile(), largeFile(name: "holiday.mov",
+                                                                     folder: "Movies",
+                                                                     size: 3_800_000_000)]),
+                           now: Date(timeIntervalSince1970: 1_786_000_000), moveToTrash: true)
+
+    // An empty box, the size, the name, and the folder that tells two of them apart.
+    #expect(text.contains("[ ]    1.2 GB  scan.pdf  (~/Documents/archive/scans/batch-a/current)"))
+    #expect(text.contains("[ ]    3.8 GB  holiday.mov  (~/Movies)"))
+    // Both notes, because either alone reads as the whole truth: nothing brings it back,
+    // **and** it is not deleted outright, so the Trash really is the way back.
+    #expect(text.contains(ReportText.irreplaceableNote))
+    #expect(text.contains(ReportText.untickedNote))
+    // Never the `mentionOnly` sentence. These rows do have a button — the checklist page's —
+    // and telling the reader "devcleaner never removes it" would be false.
+    #expect(!text.contains(ReportText.mentionOnlyNote))
+    // The numbers: 5.0 GB offered, none of it in the headline.
+    #expect(text.contains("Ticked by default:    up to 40.0 GB"))
+    #expect(text.contains("Offered, not ticked:  5.0 GB"))
+    #expect(text.contains("Big things  —  0 KB ticked, 2 rows"))
+}
+
+/// The row's own two lines, read directly, so the exact order of the notes is pinned
+/// somewhere the group heading cannot hide a change in.
+@Test func aLargeFileRowPrintsItsTargetThenTheTwoThingsTheSizeDoesNotSay() {
+    let lines = report.rowLines(largeFile())
+
+    #expect(lines.count == 2)
+    #expect(lines[1].contains("~/Documents/archive/scans/batch-a/current/scan.pdf"))
+    #expect(report.targetLine(largeFile()) ==
+        "~/Documents/archive/scans/batch-a/current/scan.pdf"
+        + " · " + ReportText.irreplaceableNote
+        + " · " + ReportText.untickedNote)
+    // Not the permanence note: that one is for the three device cases, which have no path
+    // and no Trash, and saying it here would contradict the sentence beside it.
+    #expect(!report.targetLine(largeFile()).contains(ReportText.permanentNote))
+    #expect(!report.targetLine(largeFile()).contains(ReportText.sharedNote))
 }

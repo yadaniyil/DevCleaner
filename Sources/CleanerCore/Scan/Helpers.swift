@@ -24,6 +24,26 @@ public enum ScanHelpers {
         }
     }
 
+    /// Whether the entry at `path` is a symbolic link.
+    ///
+    /// `children(of:)` answers `isDirectory` through `fileExists(atPath:isDirectory:)`,
+    /// which **follows** the link — so a link pointing at a real directory elsewhere
+    /// arrives looking like an ordinary child. Every other scanner in this package works
+    /// from a fixed allowlist, where a link at a known path is the tool's own business;
+    /// the two scanners that enumerate a directory they have no names for (`other.xdgCache`
+    /// and `big.downloads`) are the ones where a link somebody put there would decide what
+    /// gets offered. Trashing a link moves the link and not its target, so the cost is a
+    /// row promising bytes that never come back, under a name that is not a cache at all.
+    ///
+    /// `attributesOfItem` is `lstat`-shaped and reports the link itself, which is exactly
+    /// the answer `fileExists` cannot give.
+    public static func isSymbolicLink(
+        _ path: String, fileManager: FileManager = .default
+    ) -> Bool {
+        let attributes = try? fileManager.attributesOfItem(atPath: path)
+        return attributes?[.type] as? FileAttributeType == .typeSymbolicLink
+    }
+
     /// What `SizeMeasuring` answered for one path: the size to show, and whether it
     /// could be measured at all.
     ///
@@ -49,12 +69,14 @@ public enum ScanHelpers {
         scannerID: String, group: GroupID, path: String, name: String,
         detail: String? = nil, sizeBytes: Int64, lastUsed: Date? = nil,
         risk: RiskLevel = .safe, protection: ProtectionReason? = nil,
-        startsUnticked: Bool = false, sizeMayBeShared: Bool = false
+        startsUnticked: Bool = false, sizeMayBeShared: Bool = false,
+        untickedReason: ProtectionReason? = nil
     ) -> CleanupItem {
         CleanupItem(
             id: "\(scannerID)|\(path)", scannerID: scannerID, group: group,
             name: name, detail: detail, sizeBytes: sizeBytes, lastUsed: lastUsed,
             risk: risk, protection: protection, method: .removePath(path),
-            startsUnticked: startsUnticked, sizeMayBeShared: sizeMayBeShared)
+            startsUnticked: startsUnticked, sizeMayBeShared: sizeMayBeShared,
+            untickedReason: untickedReason)
     }
 }

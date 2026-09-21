@@ -26,10 +26,23 @@ public struct PathGuard: Sendable {
     }
 
     private let canonicalRoots: [String]
-    /// Lower-cased canonical paths. macOS volumes are case-insensitive by default, so
+    /// Lower-cased canonical paths, **each forbidden target registered under both of its
+    /// spellings**. macOS volumes are case-insensitive by default, so
     /// `<root>/MY-PROJECT` and `<root>/my-project` are the same directory and both have
     /// to be refused. `realpath` case-corrects whatever it resolves, but `validate`
     /// re-attaches the final component verbatim, so the comparison has to ignore case.
+    ///
+    /// Both spellings, because `validate` compares `canonicaliseKeepingLeaf` and a
+    /// forbidden target whose **own last component is a symlink** canonicalises to its
+    /// destination — so registering only that would store the rule under a path the guard
+    /// never asks about. Two real layouts reach it. `~/dev/current -> ~/dev/app-v3`:
+    /// `ProjectDiscovery` follows the link and reports `~/dev/current` as a project, which
+    /// `forRun` lists as a forbidden target, while `validate("~/dev/current")` keeps the
+    /// leaf and would find nothing but the `~/dev` root, which admits it. And
+    /// `~/.cache/huggingface` moved to an external disk by symlink: a forbidden target
+    /// sitting inside the allowed `.cache` root, where the forbidden set is the only thing
+    /// standing between the run and the model store the dictation-app incident was about.
+    /// `aForbiddenTargetThatIsASymlinkInsideAnAllowedRootIsStillRefused` is what holds it.
     private let forbidden: Set<String>
     /// Single paths that are allowed without their parent becoming a root.
     ///
@@ -49,7 +62,13 @@ public struct PathGuard: Sendable {
                 allowedExactPaths: [String] = []) {
         self.canonicalRoots = allowedRoots.compactMap(PathGuard.canonicalise)
         self.exactPaths = Set(allowedExactPaths.compactMap(PathGuard.canonicaliseKeepingLeaf))
-        var targets = Set(forbiddenTargets.compactMap(PathGuard.canonicalise).map { $0.lowercased() })
+        // Both spellings of every target — fully resolved, and resolved except for the
+        // leaf — for the reason on `forbidden` above. The two are the same string for
+        // anything that is not a symlink, so this only ever adds the entry that was
+        // missing.
+        var targets = Set(forbiddenTargets.flatMap {
+            [PathGuard.canonicalise($0), PathGuard.canonicaliseKeepingLeaf($0)]
+        }.compactMap { $0?.lowercased() })
         targets.insert("/")
         targets.insert(FileManager.default.homeDirectoryForCurrentUser.path.lowercased())
         if let home = PathGuard.canonicalise(FileManager.default.homeDirectoryForCurrentUser.path) {

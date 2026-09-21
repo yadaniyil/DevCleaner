@@ -261,25 +261,180 @@ private func writeDerivedData(_ temp: TempDir, name: String, workspace: String?)
     #expect(DeviceSupportScanner().group == .xcodeAndIOS)
 }
 
-@Test func deviceSupportEntriesAreAlwaysDeletable() async throws {
-    let temp = TempDir()
-    let path = temp.makeDirectory("Library/Developer/Xcode/iOS DeviceSupport/18.2 (22C150)")
-    let items = await DeviceSupportScanner().scan(context(temp: temp, sizes: [path: 3_000_000_000]))
-    #expect(items.count == 1)
-    let item = try #require(items.first)
-    #expect(item.isDeletable)
-    #expect(item.sizeBytes == 3_000_000_000)
-    #expect(item.method == .removePath(path))
+// MARK: - device support: the folder in use is kept
+
+/// Writes one device support folder with a modification date, and answers its path.
+///
+/// The date is the whole of the keeping rule, so it is never defaulted: a fixture that
+/// left it to whatever the filesystem stamped would be testing the order `mkdir` happened
+/// to run in.
+private func writeDeviceSupport(
+    _ temp: TempDir, platform: String = "iOS", _ name: String, modified: Date?
+) -> String {
+    let relative = "Library/Developer/Xcode/\(platform) DeviceSupport/\(name)"
+    let path = temp.makeDirectory(relative)
+    if let modified {
+        try! FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: path)
+    }
+    return path
 }
 
-@Test func watchDeviceSupportIsOfferedSeparatelyFromIOSSupport() async throws {
+private let september14 = Date(timeIntervalSince1970: 1_757_808_000)
+private let september2 = Date(timeIntervalSince1970: 1_756_771_200)
+private let august30 = Date(timeIntervalSince1970: 1_756_512_000)
+
+/// The four folders a real dev machine has, and the two the tool may offer.
+///
+/// 27 GB sat here offered and ticked under the sentence "rebuilt when you next connect a
+/// device". "Rebuilt" was Xcode copying about 7 GB of symbols back off the phone over a
+/// cable — several minutes of "Preparing device for development" before the next build —
+/// so the folder the phone is actually running had to stop being offered. The two
+/// abandoned betas are the dead weight, and they are what is left.
+@Test func onlyTheOlderDeviceSupportBuildsOfOneDeviceAreOffered() async throws {
     let temp = TempDir()
-    let ios = temp.makeDirectory("Library/Developer/Xcode/iOS DeviceSupport/18.2")
-    let watch = temp.makeDirectory("Library/Developer/Xcode/watchOS DeviceSupport/11.2")
+    let release = writeDeviceSupport(temp, "iPhone17,2 27.0 (24A435)", modified: september14)
+    let olderBeta = writeDeviceSupport(temp, "iPhone17,2 27.0 (24A5424a)", modified: august30)
+    let newerBeta = writeDeviceSupport(temp, "iPhone17,2 27.0 (24A5430a)", modified: september2)
+    let iPad = writeDeviceSupport(temp, "iPad15,7 26.6 (23G71)", modified: august30)
+
+    let items = await DeviceSupportScanner().scan(context(temp: temp, sizes: [
+        release: 7_000_000_000, olderBeta: 6_800_000_000,
+        newerBeta: 6_900_000_000, iPad: 6_300_000_000,
+    ]))
+
+    #expect(items.filter(\.isDeletable).map(\.method)
+            == [.removePath(olderBeta), .removePath(newerBeta)])
+    // The iPad's only folder is kept as well: a family of one is always the newest of its
+    // family, which is what stops this rule from emptying a device that was connected once.
+    #expect(items.filter { !$0.isDeletable }.map(\.method)
+            == [.removePath(iPad), .removePath(release)])
+    #expect(items.filter { !$0.isDeletable }.allSatisfy { $0.protection == .newestDeviceSupport })
+}
+
+/// The totals follow, which is the number the user reads. 27.0 GB of device support is
+/// really 13.7 GB of it, and the rest is the price of the next build.
+@Test func theKeptDeviceSupportFoldersAreNotCountedAsReclaimable() async {
+    let temp = TempDir()
+    let release = writeDeviceSupport(temp, "iPhone17,2 27.0 (24A435)", modified: september14)
+    let beta = writeDeviceSupport(temp, "iPhone17,2 27.0 (24A5424a)", modified: august30)
+    let iPad = writeDeviceSupport(temp, "iPad15,7 26.6 (23G71)", modified: august30)
+
+    let items = await DeviceSupportScanner().scan(context(temp: temp, sizes: [
+        release: 7_000_000_000, beta: 6_800_000_000, iPad: 6_300_000_000,
+    ]))
+    let result = ScanResult(items: items, generatedAt: now, availableBytes: 0,
+                            skippedScannerIDs: [])
+
+    #expect(result.reclaimableBytes == 6_800_000_000)
+    #expect(result.items.count == 3)
+}
+
+/// Each row says which device it is for and what letting it go costs — the wording is what
+/// makes the offer honest, so it is pinned rather than left to drift.
+@Test func deviceSupportRowsSayWhichDeviceTheyBelongToAndWhichOneXcodeUses() async throws {
+    let temp = TempDir()
+    let release = writeDeviceSupport(temp, "iPhone17,2 27.0 (24A435)", modified: september14)
+    let beta = writeDeviceSupport(temp, "iPhone17,2 27.0 (24A5424a)", modified: august30)
+
+    let items = await DeviceSupportScanner().scan(context(
+        temp: temp, sizes: [release: 7_000_000_000, beta: 6_800_000_000]))
+
+    let kept = try #require(items.first { $0.method == .removePath(release) })
+    #expect(kept.detail == "the one Xcode uses for iPhone17,2 now")
+    let offered = try #require(items.first { $0.method == .removePath(beta) })
+    #expect(offered.detail
+            == "an older iOS build for iPhone17,2 — Xcode uses the newer one")
+    // The sentence that used to be here promised a rebuild that does not happen, so no row
+    // may carry it any more.
+    #expect(items.allSatisfy { $0.detail != "rebuilt when you next connect a device" })
+    // Nothing on this Mac remakes it: the symbols come off the device, and for an
+    // abandoned beta that device may never run that build again.
+    #expect(items.allSatisfy { $0.risk == .elevated })
+}
+
+/// A watch and a phone are never in one family, so each keeps its own newest folder.
+///
+/// This is also the test that used to assert both were offered. Both are now kept, because
+/// each is the only folder for its device — which is the rule working, not an omission.
+@Test func watchDeviceSupportIsAFamilyOfItsOwnAndKeepsItsOwnNewest() async {
+    let temp = TempDir()
+    let ios = writeDeviceSupport(temp, "iPhone17,2 18.2", modified: september14)
+    let watch = writeDeviceSupport(temp, platform: "watchOS", "Watch7,1 11.2",
+                                   modified: august30)
 
     let items = await DeviceSupportScanner().scan(context(
         temp: temp, sizes: [ios: 2_000_000_000, watch: 900_000_000]))
 
-    #expect(items.map(\.name) == ["iOS 18.2", "watchOS 11.2"])
+    #expect(items.map(\.name) == ["iOS iPhone17,2 18.2", "watchOS Watch7,1 11.2"])
     #expect(items.map(\.method) == [.removePath(ios), .removePath(watch)])
+    #expect(items.allSatisfy { $0.protection == .newestDeviceSupport })
+}
+
+/// A folder named the way older Xcode named them — the build alone, no device model.
+///
+/// Grouped by its first word, `16.4` and `17.1` would be two families and both would be
+/// kept, which is the whole bug inverted: nothing would ever be offered. They fall into one
+/// family per platform instead, so the newest of them survives and the rest are offered.
+@Test func deviceSupportFoldersWithNoDeviceModelShareOneFamilyPerPlatform() async throws {
+    let temp = TempDir()
+    let older = writeDeviceSupport(temp, "16.4 (20F66)", modified: august30)
+    let newer = writeDeviceSupport(temp, "17.1 (21B74)", modified: september14)
+
+    let items = await DeviceSupportScanner().scan(context(
+        temp: temp, sizes: [older: 5_000_000_000, newer: 6_000_000_000]))
+
+    #expect(items.filter(\.isDeletable).map(\.method) == [.removePath(older)])
+    let offered = try #require(items.first { $0.method == .removePath(older) })
+    // No model to name, so the sentence says "this device" rather than inventing one.
+    #expect(offered.detail == "an older iOS build for this device — Xcode uses the newer one")
+    let kept = try #require(items.first { $0.method == .removePath(newer) })
+    #expect(kept.detail == "the one Xcode uses for this device now")
+    #expect(DeviceSupportScanner.model(inFolderNamed: "16.4 (20F66)") == nil)
+    #expect(DeviceSupportScanner.model(inFolderNamed: "iPhone17,2 27.0 (24A435)") == "iPhone17,2")
+}
+
+/// Two folders modified at the same instant. The winner is fixed rather than whichever the
+/// directory listing happened to put first: a keeping rule that moved between scans would
+/// offer the live folder every other time.
+@Test func deviceSupportTiesOnTheDateAreBrokenByTheNameThatSortsLast() async {
+    let temp = TempDir()
+    let first = writeDeviceSupport(temp, "iPhone17,2 27.0 (24A100)", modified: september14)
+    let last = writeDeviceSupport(temp, "iPhone17,2 27.0 (24A999)", modified: september14)
+
+    let items = await DeviceSupportScanner().scan(context(
+        temp: temp, sizes: [first: 7_000_000_000, last: 7_000_000_000]))
+
+    #expect(items.filter(\.isDeletable).map(\.method) == [.removePath(first)])
+    #expect(items.filter { !$0.isDeletable }.map(\.method) == [.removePath(last)])
+}
+
+/// An unknown date never beats a known one. Keeping the undated folder would leave the live
+/// one offered and ticked, which is the outcome this whole rule exists to prevent — and
+/// "no date" is not evidence of anything, unlike a date.
+@Test func aDeviceSupportFolderWithNoDateNeverWinsOverOneThatHasOne() async {
+    let temp = TempDir()
+    // `newest(of:)` is asked directly rather than through a fixture, because a real
+    // directory entry always has a modification date: `nil` is what
+    // `ScanHelpers.children` answers when it cannot read the attributes at all, which no
+    // temporary directory can be made to do. The rule is still the one the scan depends on.
+    let dated = writeDeviceSupport(temp, "iPhone17,2 27.0 (24A435)", modified: september14)
+
+    let undated = DeviceSupportScanner.Candidate(
+        child: ScanHelpers.Child(name: "iPhone17,2 27.0 (24A9999)",
+                                 path: "/tmp/undated", isDirectory: true, modified: nil),
+        platform: "iOS", model: "iPhone17,2")
+    let known = DeviceSupportScanner.Candidate(
+        child: ScanHelpers.Child(name: "iPhone17,2 27.0 (24A435)",
+                                 path: dated, isDirectory: true, modified: august30),
+        platform: "iOS", model: "iPhone17,2")
+
+    #expect(DeviceSupportScanner.newest(of: [undated, known])?.child.path == dated)
+    #expect(DeviceSupportScanner.newest(of: [known, undated])?.child.path == dated)
+    // With nothing dated at all, the name that sorts last wins — arbitrary, but fixed.
+    let otherUndated = DeviceSupportScanner.Candidate(
+        child: ScanHelpers.Child(name: "iPhone17,2 27.0 (24A0001)",
+                                 path: "/tmp/other", isDirectory: true, modified: nil),
+        platform: "iOS", model: "iPhone17,2")
+    #expect(DeviceSupportScanner.newest(of: [undated, otherUndated])?.child.path
+            == "/tmp/undated")
 }

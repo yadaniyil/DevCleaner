@@ -43,6 +43,11 @@ import CleanerCore
     #expect(SettingsText.moveToTrashHelp.contains("Trash"))
     // And it must not promise that devices obey it.
     #expect(SettingsText.moveToTrashHelp.contains("Simulators"))
+    // The other rule the switch does not reach, and it points the opposite way: one of the
+    // user's own large files is always trashed, because there would be nothing anywhere to
+    // get it back from. A user who turns this off and reads nothing about that has been
+    // left believing they signed up for something the app will never do.
+    #expect(SettingsText.moveToTrashHelp.contains("always go to the Trash either way"))
 }
 
 @Test func theKeptDevicePickerOffersTheAutomaticChoiceFirst() {
@@ -51,9 +56,15 @@ import CleanerCore
 
 /// Devices and projects are listed from the last scan. Before there is one, the sections
 /// say why they are empty rather than looking broken.
+///
+/// They send the user to the button that exists, by the name it really has. The menu bar's
+/// "Rescan" went with the checklist; the control is `ProjectDeckText.scanAgain`, in the
+/// window's toolbar and on the menu bar panel, so an instruction naming the old one points
+/// at nothing on screen.
 @Test func theEmptyPickerSentencesPointAtARescan() {
-    #expect(SettingsText.noProjectsYet.contains("Rescan"))
-    #expect(SettingsText.noDevicesYet.contains("Rescan"))
+    #expect(SettingsText.noProjectsYet.contains(ProjectDeckText.scanAgain))
+    #expect(SettingsText.noDevicesYet.contains(ProjectDeckText.scanAgain))
+    #expect(!SettingsText.noProjectsYet.contains("Rescan"))
 }
 
 // MARK: - labels that could be copied into the wrong row
@@ -285,9 +296,10 @@ import CleanerCore
 /// A pin list emptied because every root was refused as too wide is not the same emptiness
 /// as no projects found.
 ///
-/// `noProjectsYet` says "Rescan from the popover, or add the folder your code is in above" —
-/// printed directly under the root that made the list empty, and the rescan refuses that same
-/// root again. It is the project section's version of a picker emptied by its own scanner.
+/// `noProjectsYet` says "Scan again from the DevCleaner window, or add the folder your code
+/// is in above" — printed directly under the root that made the list empty, and the next scan
+/// refuses that same root again. It is the project section's version of a picker emptied by
+/// its own scanner.
 @Test func aPinListEmptiedByRefusedRootsSaysSoRatherThanAskingForARescan() {
     var draft = Settings.makeDefault(home: "/Users/test")
     draft.projectRoots = ["~"]
@@ -334,7 +346,7 @@ import CleanerCore
 /// Storage says "always skip"; the switch says "look at this". The mapping between those two
 /// meanings is a pair of `!`, and it used to live in the view where no test could reach it.
 ///
-/// Drop or misplace one and all sixteen switches invert: the user turns a scanner **on** and
+/// Drop or misplace one and every switch inverts: the user turns a scanner **on** and
 /// the app writes its identifier into `alwaysSkipScannerIDs`, taking that whole group out of
 /// the scan and out of the total, with nothing on screen to say so.
 @Test func aScannerSwitchIsOnExactlyWhenTheScannerIsNotSkipped() {

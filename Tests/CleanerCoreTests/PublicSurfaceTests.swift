@@ -46,6 +46,24 @@ import CleanerCore
     #expect(project.name == "sample-project")
 }
 
+/// Everything the checklist card is built out of has to be reachable **without**
+/// `@testable`, because that is the import `DevCleanerUI` and `DevCleanerApp` really have.
+///
+/// The deck recognises the page by `DeckDealing.checklist` off `ScannerInfo.dealing`, and
+/// recognises a row as one of the user's own files by the scanner's identifier. Both were
+/// added for this feature, and a `public enum` case or a `public static let` that is
+/// reachable only under `@testable` is a compile error in the app target and nowhere else —
+/// which is exactly how `SimulatorDevice`'s missing initialiser was found.
+@Test func theChecklistCardsContractIsReachableFromAnotherModule() {
+    #expect(LargeFilesScanner.scannerID == "big.largeFiles")
+    #expect(LargeFilesScanner().deckDealing == DeckDealing.checklist)
+
+    let info = CleanerService.scanner(withID: LargeFilesScanner.scannerID)
+    #expect(info?.dealing == .checklist)
+    #expect(info?.title == "Large files")
+    #expect(info?.group == .bigThings)
+}
+
 /// `TildePath` has to be reachable from another module or there would be two expansions
 /// again: `SettingsModel.addProjectRoot` lives in `DevCleanerUI` and has to expand the same
 /// way the engine does, or the root on screen and the root the engine walks are two

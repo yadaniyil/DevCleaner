@@ -137,11 +137,13 @@ public enum CLIText {
 
 /// A selection divided by whether it can be undone.
 ///
-/// The division is not `Settings.moveToTrash` alone. `simctl delete`, `simctl runtime
-/// delete` and `avdmanager delete avd` have no Trash, so every row whose
-/// `DeletionMethod.path` is nil is permanent whatever that setting says — 17.8 GB of the
-/// 58.0 GB a default clean removes on a real dev machine. Showing one list would tell the user
-/// that all of it is restorable.
+/// The division is not `Settings.moveToTrash` alone, and it bends in both directions.
+/// `simctl delete`, `simctl runtime delete` and `avdmanager delete avd` have no Trash, so
+/// every row whose `DeletionMethod.path` is nil is permanent whatever that setting says —
+/// 17.8 GB of the 58.0 GB a default clean removes on a real dev machine. And an
+/// `.irreplaceable` row is one of the user's own files, which the executor always trashes
+/// even in permanent mode. Showing one list would tell the user that all of it is
+/// restorable; using the setting alone would get both exceptions wrong.
 public struct RemovalSplit: Sendable, Equatable {
     public let toTrash: [CleanupItem]
     public let permanent: [CleanupItem]
@@ -151,9 +153,11 @@ public struct RemovalSplit: Sendable, Equatable {
     /// Both totals use `ScanResult.totalBytes`, so each deletion target counts once here
     /// exactly as it counts once in the headline.
     public init(items: [CleanupItem], moveToTrash: Bool) {
-        // `method.path != nil` is exactly the path cases; the three device cases are nil.
-        let trashable = moveToTrash ? items.filter { $0.method.path != nil } : []
-        let rest = moveToTrash ? items.filter { $0.method.path == nil } : items
+        // `CleanupItem.goesToTheTrash`, which is the same test `Executor.perform` branches
+        // on. A second spelling here is how the plan printed before a run and the run
+        // itself come to disagree about the one fact the user acts on.
+        let trashable = items.filter { $0.goesToTheTrash(moveToTrash: moveToTrash) }
+        let rest = items.filter { !$0.goesToTheTrash(moveToTrash: moveToTrash) }
         toTrash = trashable
         permanent = rest
         trashBytes = ScanResult.totalBytes(of: trashable)
@@ -190,16 +194,48 @@ public struct ReportText: Sendable {
         "these bytes may be shared with files that are staying, so removing it may free less"
     public static let untickedNote = "offered but not ticked — a default clean leaves it alone"
 
+    /// The note beside a row of a `DeckDealing.mentionOnly` scanner.
+    ///
+    /// `untickedNote` alone would be true and misleading. "A default clean leaves it alone"
+    /// is what the Android NDK's row says, and that row can be cleaned — the deck puts it on
+    /// a card with a button. These rows cannot be cleaned by anything: no card, no tick, no
+    /// `--all` flag, nothing. A listing that described the two the same way would leave the
+    /// reader looking for the switch that turns this one on.
+    ///
+    /// So it says what it is, and then where the space really is. The browsers and the
+    /// desktop apps both clear their own caches from their own settings, which is the honest
+    /// answer for every row this note can appear on — and it is the same answer
+    /// `ProjectDeckText.moreToGainNote` gives the window, in that file's own voice.
+    ///
+    /// **Deliberately not an `untickedReason`.** That field is a `ProtectionReason`, and
+    /// every case of that enum is a statement that *something is using this* — a pin, a
+    /// booted simulator, a project changed this fortnight. None of them is true of a
+    /// browsing cache; the reason these are left alone is a decision about the app, not a
+    /// fact about the row. Borrowing the vocabulary would have put the wrong kind of claim
+    /// in a field the settings window and the card cautions both read.
+    public static let mentionOnlyNote =
+        "devcleaner never removes it — the app that wrote it clears its own cache"
+    /// The note beside one of the user's own files. Says both halves, because either on its
+    /// own would be read as the whole: nothing brings it back, **and** it is not deleted
+    /// outright, so the Trash really is the way back until it is emptied.
+    public static let irreplaceableNote =
+        "does not come back by itself — always goes to the Trash, never deleted outright"
+
     /// The character in the box at the start of a row.
     ///
     /// Read from `selectedByDefault`, **never** from `isDeletable`. They stopped being the
     /// same value when `startsUnticked` arrived: the two Android NDK rows are deletable and
     /// deliberately unticked, 5.6 GB that only comes back over the network. A listing that
     /// marks them `x` tells the user a default clean will take them, and it will not.
+    ///
+    /// `risk == .safe` rather than `risk == .elevated` for the last line, so the legend's
+    /// "higher risk" mark covers `.irreplaceable` too. Every such row is `startsUnticked`
+    /// and returns above this line today; the spelling is the one that stays right if one
+    /// ever is not.
     public static func mark(for item: CleanupItem) -> String {
         guard item.isDeletable else { return "-" }
         guard item.selectedByDefault else { return " " }
-        return item.risk == .elevated ? "!" : "x"
+        return item.risk == .safe ? "x" : "!"
     }
 
     /// The two lines that make up one row of the listing.
@@ -225,9 +261,30 @@ public struct ReportText: Sendable {
         // saying "removed permanently" beside a row marked kept reads as a threat the
         // listing then contradicts two columns to the left.
         if item.isDeletable, item.method.path == nil { parts.append(Self.permanentNote) }
+        // Guarded the same way, and for the same reason: a protected device support folder
+        // is never removed, so a sentence about where it would go is a claim the `[-]` two
+        // columns to the left contradicts.
+        if item.isDeletable, item.risk == .irreplaceable {
+            parts.append(Self.irreplaceableNote)
+        }
         if item.sizeMayBeShared { parts.append(Self.sharedNote) }
         if item.startsUnticked { parts.append(Self.untickedNote) }
+        // After the unticked note, and instead of nothing: a row nothing can ever remove is
+        // still offered-not-ticked, so the number stays findable in the listing's own
+        // "Offered, not ticked" total — but the reader has to be told that this particular
+        // one has no button anywhere. Read off the scanner's `DeckDealing` rather than off a
+        // list of identifiers here, so a scanner that changes its mind changes this line
+        // with it.
+        if Self.isMentionOnly(item) { parts.append(Self.mentionOnlyNote) }
         return parts.joined(separator: " · ")
+    }
+
+    /// Whether this row's scanner is one the app never cleans.
+    ///
+    /// `nil` from `scanner(withID:)` — a row out of a `cache.json` a different build wrote —
+    /// answers `false`, which is the reading that promises the reader less rather than more.
+    static func isMentionOnly(_ item: CleanupItem) -> Bool {
+        CleanerService.scanner(withID: item.scannerID)?.dealing == .mentionOnly
     }
 
     /// Exhaustive with no `default`, so a new `DeletionMethod` case stops the build here

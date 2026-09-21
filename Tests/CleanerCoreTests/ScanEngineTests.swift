@@ -34,17 +34,26 @@ private struct RecordingScanner: CleanupScanner {
     }
 }
 
+/// `path` and `startsUnticked` default to what every call site written before the
+/// large-files rule meant, so only the tests about that rule say anything about them.
 private func makeItem(_ id: String, scanner: String, group: GroupID,
-                      size: Int64, protection: ProtectionReason? = nil) -> CleanupItem {
+                      size: Int64, protection: ProtectionReason? = nil,
+                      path: String? = nil, startsUnticked: Bool = false) -> CleanupItem {
     CleanupItem(id: id, scannerID: scanner, group: group, name: id, detail: nil,
                 sizeBytes: size, lastUsed: nil, risk: .safe, protection: protection,
-                method: .removePath("/tmp/\(id)"))
+                method: .removePath(path ?? "/tmp/\(id)"), startsUnticked: startsUnticked)
 }
 
-private func makeContext(settings: Settings = .makeDefault(home: "/Users/tester")) -> ScanContext {
+/// `home` defaults to a path that exists nowhere, which is all the tests about collecting
+/// and skipping need. The tests about a row sitting inside another row's target pass a real
+/// `TempDir`, because that rule compares canonicalised paths and canonicalising is what a
+/// made-up path cannot do.
+private func makeContext(settings: Settings? = nil,
+                         home: String = "/Users/tester") -> ScanContext {
     ScanContext(
-        settings: settings, protection: .empty, projects: [], devices: .empty,
-        home: "/Users/tester", androidSDKPath: "/Users/tester/Library/Android/sdk",
+        settings: settings ?? .makeDefault(home: home), protection: .empty, projects: [],
+        devices: .empty,
+        home: home, androidSDKPath: home + "/Library/Android/sdk",
         sizeMeasurer: FixedSizeMeasurer([:]), runner: FakeProcessRunner(responses: [:]),
         fileManager: .default, now: Date(timeIntervalSince1970: 1_786_000_000))
 }
@@ -186,7 +195,7 @@ private func makeContext(settings: Settings = .makeDefault(home: "/Users/tester"
 /// Finding nothing is the normal case, not a failure: a machine with no Android
 /// SDK makes several scanners return an empty list. The rest of the scan must
 /// still run, and an empty result must not be reported as a skipped scanner —
-/// the popover draws a skipped scanner as switched off.
+/// the menu bar panel reports a skipped scanner as switched off.
 @Test func engineKeepsGoingAfterAScannerFindsNothing() async {
     let engine = ScanEngine(scanners: [
         StubScanner(id: "android.sdk", group: .android, title: "SDK", items: []),
@@ -231,6 +240,168 @@ private func makeContext(settings: Settings = .makeDefault(home: "/Users/tester"
     let result = await engine.scan(context: makeContext())
     #expect(result.items.map(\.id) == ["a", "b"])
     #expect(result.generatedAt == Date(timeIntervalSince1970: 1_786_000_000))
+}
+
+// MARK: - a large file inside another row's target
+
+/// A `big.largeFiles` row for a path, shaped as `LargeFilesScanner` shapes one.
+private func largeFile(_ path: String) -> CleanupItem {
+    CleanupItem(
+        id: LargeFilesScanner.scannerID + "|" + path,
+        scannerID: LargeFilesScanner.scannerID, group: .bigThings,
+        name: (path as NSString).lastPathComponent, detail: nil, sizeBytes: 1_700_000_000,
+        lastUsed: nil, risk: .irreplaceable, protection: nil,
+        method: .removePath(path), startsUnticked: true)
+}
+
+/// **The row is dropped whatever the containing row is**, because the reason differs and
+/// both reasons cost the user something.
+///
+/// A ticked container — a project's `build` folder — would mean asking about one file
+/// twice, once as part of a folder that comes back and once as a film that does not, and
+/// whichever card was answered second would be describing bytes that had already gone. An
+/// unticked container is the same double offer with the order reversed. A **protected**
+/// container is the sharpest of the three: protection means "must not be deleted at all",
+/// and offering a 1.2 GB scan inside a kept project with a checkbox beside it would be the
+/// app taking the promise back one file at a time.
+///
+/// `big.largeFiles` is the only scanner that looks everywhere, so it is the only one whose
+/// rows can land inside another's — which is why the rule reads in one direction.
+@Test func aLargeFileInsideAnyOtherRowsTargetIsDroppedTickedUntickedOrProtected() async {
+    let temp = TempDir()
+    let ticked = temp.makeDirectory("dev/app/build")
+    let unticked = temp.makeDirectory("Library/Android/sdk/ndk/27.0.12077973")
+    let kept = temp.makeDirectory("dev/live")
+
+    let inTicked = temp.makeFile("dev/app/build/fixture.mov", contents: "x")
+    let inUnticked = temp.makeFile(
+        "Library/Android/sdk/ndk/27.0.12077973/toolchain.bin", contents: "x")
+    let inKept = temp.makeFile("dev/live/work/scan.pdf", contents: "x")
+    let loose = temp.makeFile("Documents/render.mov", contents: "x")
+
+    let engine = ScanEngine(scanners: [
+        StubScanner(id: "projects.buildOutput", group: .projects, title: "Build output",
+                    items: [makeItem("build", scanner: "projects.buildOutput",
+                                     group: .projects, size: 5_000, path: ticked)]),
+        StubScanner(id: "android.ndk", group: .android, title: "NDK",
+                    items: [makeItem("ndk", scanner: "android.ndk", group: .android,
+                                     size: 5_570_000_000, path: unticked,
+                                     startsUnticked: true)]),
+        StubScanner(id: "projects.summary", group: .projects, title: "Kept projects",
+                    items: [makeItem("live", scanner: "projects.buildOutput",
+                                     group: .projects, size: 0,
+                                     protection: .recentActivity(days: 14), path: kept)]),
+        StubScanner(id: LargeFilesScanner.scannerID, group: .bigThings, title: "Large files",
+                    items: [inTicked, inUnticked, inKept, loose].map(largeFile)),
+    ])
+
+    let result = await engine.scan(context: makeContext(home: temp.path))
+
+    // Only the film that is inside nothing survives, and the four containing rows are all
+    // still there — this drops the duplicate offer, never the row that owns the folder.
+    #expect(result.items.filter { $0.scannerID == LargeFilesScanner.scannerID }
+            .map(\.name) == ["render.mov"])
+    #expect(result.items.count == 4)
+}
+
+/// **Separator-aware**, the standing rule in this package about path prefixes.
+///
+/// `~/dev/app/build` must not swallow `~/dev/app/build2`, and a row must not be dropped by
+/// a container that merely *equals* a prefix of its own name. Both directions of the rule
+/// are here because a bare `hasPrefix` passes neither and a rule that dropped too much
+/// would lose the user a file they wanted to see with nothing on screen to say so.
+@Test func onlyARowGenuinelyInsideAContainerIsDroppedNotOneWhoseNameStartsTheSame() async {
+    let temp = TempDir()
+    let container = temp.makeDirectory("dev/app/build")
+    let sibling = temp.makeFile("dev/app/build2/huge.mov", contents: "x")
+    let inside = temp.makeFile("dev/app/build/huge.mov", contents: "x")
+
+    let engine = ScanEngine(scanners: [
+        StubScanner(id: "projects.buildOutput", group: .projects, title: "Build output",
+                    items: [makeItem("build", scanner: "projects.buildOutput",
+                                     group: .projects, size: 5_000,
+                                     path: container)]),
+        StubScanner(id: LargeFilesScanner.scannerID, group: .bigThings, title: "Large files",
+                    items: [sibling, inside].map(largeFile)),
+    ])
+
+    let result = await engine.scan(context: makeContext(home: temp.path))
+
+    #expect(result.items.filter { $0.scannerID == LargeFilesScanner.scannerID }
+            .map(\.method) == [.removePath(sibling)])
+}
+
+/// The rule reads **only** `big.largeFiles` rows, and only as the thing that might be
+/// inside something.
+///
+/// Every other scanner names a directory inside a tool's own tree that it alone knows
+/// about, and the pairs that do overlap — a Gradle cache under `~/.gradle`, a simulator
+/// runtime — are already one row each by target. A rule that dropped any row sitting inside
+/// any other would take the archive out of `~/Library/Developer/Xcode/Archives` the moment
+/// something named the parent, so it is deliberately one-directional and deliberately about
+/// one identifier.
+@Test func anotherScannersRowInsideALargeFilesRowIsKept() async {
+    let temp = TempDir()
+    let film = temp.makeFile("Documents/films/holiday.mov", contents: "x")
+    // Nonsense as a layout, and the point: the rule must not start reading in this
+    // direction just because a path happens to sit under another.
+    let cache = temp.makeFile("Documents/films/holiday.mov.cache/blob", contents: "x")
+
+    let engine = ScanEngine(scanners: [
+        StubScanner(id: LargeFilesScanner.scannerID, group: .bigThings, title: "Large files",
+                    items: [largeFile(film)]),
+        StubScanner(id: "other.libraryCaches", group: .otherCaches, title: "Caches",
+                    items: [makeItem("blob", scanner: "other.libraryCaches",
+                                     group: .otherCaches, size: 5_000,
+                                     path: cache)]),
+    ])
+
+    let result = await engine.scan(context: makeContext(home: temp.path))
+    #expect(result.items.count == 2)
+}
+
+/// A scan with no other rows in it drops nothing.
+///
+/// The guard against the fast path being wrong the other way: `droppingLargeFilesInside
+/// AnotherRow` returns early when there is nothing to compare against, and a machine with
+/// no Android SDK, no projects and no caches is an ordinary machine.
+@Test func aScanHoldingNothingButLargeFilesKeepsEveryRow() async {
+    let temp = TempDir()
+    let films = ["Documents/a.mov", "Documents/b.mov"].map { temp.makeFile($0, contents: "x") }
+
+    let engine = ScanEngine(scanners: [
+        StubScanner(id: LargeFilesScanner.scannerID, group: .bigThings, title: "Large files",
+                    items: films.map(largeFile)),
+    ])
+
+    let result = await engine.scan(context: makeContext(home: temp.path))
+    #expect(result.items.map(\.method) == films.map { .removePath($0) })
+}
+
+/// A container reached through a **symlinked parent** still contains the row.
+///
+/// Both spellings of every target are compared, which is what this needs: the row's path
+/// resolves to somewhere under the real folder while the container's own string names the
+/// link. Unlike the de-duplication by target, where a wrong merge silently drops a row from
+/// the list, the wrong answer here is to keep a second offer of somebody's file — so every
+/// spelling that says "inside" is enough.
+@Test func aLargeFileIsDroppedWhenTheContainerIsSpelledThroughASymlink() async {
+    let temp = TempDir()
+    temp.makeDirectory("dev/real/build")
+    temp.makeSymlink("dev/link", to: temp.path + "/dev/real")
+    let film = temp.makeFile("dev/real/build/fixture.mov", contents: "x")
+
+    let engine = ScanEngine(scanners: [
+        StubScanner(id: "projects.buildOutput", group: .projects, title: "Build output",
+                    items: [makeItem("build", scanner: "projects.buildOutput",
+                                     group: .projects, size: 5_000,
+                                     path: temp.path + "/dev/link/build")]),
+        StubScanner(id: LargeFilesScanner.scannerID, group: .bigThings, title: "Large files",
+                    items: [largeFile(film)]),
+    ])
+
+    let result = await engine.scan(context: makeContext(home: temp.path))
+    #expect(!result.items.contains { $0.scannerID == LargeFilesScanner.scannerID })
 }
 
 @Test func homePathJoinsOntoTheHomeDirectory() {

@@ -11,7 +11,7 @@ public struct ScannerRow: Sendable, Equatable, Identifiable {
     /// `Settings.alwaysSkipScannerIDs` records what to **skip**; the switch offers to **look
     /// at** it. This is the reading half of that inversion, and `SettingsModel.setScannerOn`
     /// is the writing half. Both live here rather than in the view, where a lost `!` inverts
-    /// all sixteen switches and no test can see it.
+    /// every switch at once and no test can see it.
     public func isOn(in draft: Settings) -> Bool { !draft.isSkipped(id) }
 }
 
@@ -82,14 +82,15 @@ public enum SettingsText {
     public static let pinnedProjectsHelp =
         "A pinned project is kept whatever its dates say. Pinning always wins."
     public static let noProjectsYet =
-        "No projects found yet. Rescan from the popover, or add the folder your code is in above."
+        "No projects found yet. Scan again from the DevCleaner window, or add the folder your "
+        + "code is in above."
 
     public static let keptDevicesTitle = "Kept devices"
     public static let automaticDevice = "Most recently used"
     public static let simulator = "Simulator"
     public static let emulator = "Emulator"
     public static let noDevicesYet =
-        "No devices found yet. Rescan from the popover to list them."
+        "No devices found yet. Scan again from the DevCleaner window to list them."
 
     public static let scannersTitle = "What to look at"
     public static let scannersHelp =
@@ -99,12 +100,22 @@ public enum SettingsText {
     public static let backgroundInterval = "Scan again every"
     public static let menuBarShowsAmount = "Show the amount in the menu bar"
     public static let moveToTrash = "Move caches to the Trash"
-    /// Names both halves of the truth, because the switch changes only one of them.
+    /// Names both halves of the truth, because the switch changes only one of them — and
+    /// then both of the things it does **not** reach.
+    ///
+    /// "Caches" is the word in the label, and this is where it gets its limits. Two kinds of
+    /// row ignore the switch in opposite directions: a simulator is always permanent because
+    /// `simctl delete` has no Trash, and one of the user's own large files is always trashed
+    /// because there would be nothing anywhere to get it back from — see
+    /// `CleanupItem.goesToTheTrash(moveToTrash:)`. A user who turns this off and reads
+    /// nothing about the second one has been left believing they signed up for something the
+    /// app will never do.
     public static let moveToTrashHelp =
         "On, caches go to the Trash and you can drag them back — but the space is not "
         + "free until you empty it. Off, they are removed outright and cannot be "
         + "recovered. Simulators, runtimes and emulators are removed permanently either "
-        + "way; the tools that remove them have no Trash."
+        + "way; the tools that remove them have no Trash. Your own big files — downloads, "
+        + "AI models — always go to the Trash either way, whatever this is set to."
 
     public static let save = "Save"
 

@@ -35,6 +35,63 @@ private let referenceNow = Date(timeIntervalSince1970: 1_786_000_000)  // 2026-0
     #expect(activity < referenceNow.addingTimeInterval(-86_400 * 60))
 }
 
+/// `~/dev/workspace-one/sample-game` builds into eleven `.build…` folders. Read as activity,
+/// every build would protect the project from the clean those folders are offered for.
+@Test func ignoresBuildVariantFoldersThatHoldBuildOutput() throws {
+    let temp = TempDir()
+    temp.makeFile("proj/Package.swift", modified: referenceNow.addingTimeInterval(-86_400 * 90))
+    temp.makeFile("proj/.build-release/info.plist", modified: referenceNow)
+    temp.makeFile("proj/.build-release/Build/Products/proj.app", modified: referenceNow)
+    temp.makeFile("proj/.next/cache/x", modified: referenceNow)
+    let project = DiscoveredProject(path: temp.path + "/proj", name: "proj")
+
+    let activity = try #require(
+        ActivityInspector(runner: FakeProcessRunner(responses: [:]))
+            .lastActivity(of: project))
+    #expect(activity < referenceNow.addingTimeInterval(-86_400 * 60))
+}
+
+/// The prefix alone is not build output. The scanner refuses to offer `.build-notes`, so
+/// editing it has to count — one rule for deleting and for protecting.
+@Test func aHandWrittenFolderWithTheBuildPrefixStillCountsAsActivity() throws {
+    let temp = TempDir()
+    temp.makeFile("proj/Package.swift", modified: referenceNow.addingTimeInterval(-86_400 * 90))
+    temp.makeFile("proj/.build-notes/todo.md", modified: referenceNow.addingTimeInterval(-86_400))
+    let project = DiscoveredProject(path: temp.path + "/proj", name: "proj")
+
+    let activity = try #require(
+        ActivityInspector(runner: FakeProcessRunner(responses: [:]))
+            .lastActivity(of: project))
+    #expect(abs(activity.timeIntervalSince(referenceNow.addingTimeInterval(-86_400))) < 2)
+}
+
+/// The other half of `aVariantFolderMarkedOnlyByAnEverydayWordIsNotOffered`, and the reason
+/// that fix matters twice.
+///
+/// `debug` and `release` were build-output markers, so a hand-written `.build-scripts/`
+/// with a `release` script in it — or a `.build-config/` with a `release/` folder of
+/// plists — read as build output here. Editing it then stopped counting as working on the
+/// project, so the project quietly lost its protection at the same moment its hand-written
+/// folder became deletable. These are the user's files; touching them is activity.
+@Test func editingAHandWrittenBuildFolderNamedWithEverydayWordsCountsAsActivity() throws {
+    let temp = TempDir()
+    let yesterday = referenceNow.addingTimeInterval(-86_400)
+    temp.makeFile("proj/Package.swift", modified: referenceNow.addingTimeInterval(-86_400 * 90))
+    // A file called `release`, and a directory called `release`.
+    temp.makeFile("proj/.build-scripts/release", contents: "#!/bin/sh\n", modified: yesterday)
+    temp.makeFile("proj/.build-config/release/Signing.plist", modified: yesterday)
+    // Real build output beside them, touched by a build a minute ago, which must still be
+    // ignored — or this test would pass on an inspector that had stopped ignoring anything.
+    temp.makeFile("proj/.build-release/info.plist", modified: referenceNow)
+    let project = DiscoveredProject(path: temp.path + "/proj", name: "proj")
+
+    let activity = try #require(
+        ActivityInspector(runner: FakeProcessRunner(responses: [:]))
+            .lastActivity(of: project))
+
+    #expect(abs(activity.timeIntervalSince(yesterday)) < 2)
+}
+
 @Test func gitHeadDateWinsWhenItIsNewer() throws {
     let temp = TempDir()
     let projectPath = temp.path + "/proj"
