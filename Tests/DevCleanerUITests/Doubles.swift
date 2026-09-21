@@ -326,6 +326,126 @@ func protectedProjectRow(
         lastUsed: nil, risk: .safe, protection: reason, method: .removePath(path))
 }
 
+// MARK: - a finished run, as the executor reports one
+
+/// One entry of a run record, for the row it is about.
+///
+/// The target and the landing place are derived from the row the way the executor derives
+/// them, so a fixture cannot describe a trashed row with nowhere to have gone — `trashedTo`
+/// is the only record of where something can be dragged back from, and the end card's hidden
+/// note is read out of it.
+func runEntry(
+    of item: CleanupItem, outcome: ItemOutcome, reason: String? = nil
+) -> RunEntry {
+    RunEntry(
+        itemID: item.id, name: item.name, target: item.method.path ?? item.name,
+        sizeBytes: item.sizeBytes, outcome: outcome,
+        trashedTo: outcome == .trashed ? "\(testHome)/.Trash/\(item.name)" : nil,
+        reason: reason)
+}
+
+/// A finished run, with the times and the free-space readings defaulted.
+///
+/// For the tests of what a **card** makes of a record. The model's own clean path goes through
+/// `FakeEngine`, which builds its records from the list it was handed; this is for asking
+/// `CardRunResult` a question directly, where the whole point is to name an unlikely
+/// combination of outcomes.
+func makeRecord(_ entries: [RunEntry], notes: [String] = []) -> RunRecord {
+    RunRecord(
+        startedAt: now, finishedAt: now.addingTimeInterval(4),
+        availableBytesBefore: 100_000_000_000, availableBytesAfter: 100_060_000_000,
+        entries: entries, notes: notes)
+}
+
+// MARK: - the card's result beat, without waiting
+
+/// The sleeper every deck test hands the model: it records what it was asked to wait for and
+/// waits for nothing at all.
+///
+/// A cleaned card holds its result for `AppModel.cardResultSeconds` before the deck deals the
+/// next one — see that constant — and the beat is an awaited step inside the run's own task,
+/// so a real one would add nearly a second to each of the seventy cleans in this target. Worse
+/// than slow: `whileAsleep` is the only way a test can look at the model **during** the beat,
+/// which is where "the decision is already recorded and the card has not moved" has to be
+/// asserted.
+///
+/// It does not throw and does not check for cancellation, unlike `FakeSleeper`: the loop
+/// treats a throw as "stop for good" and the beat treats it as "cut the beat short", and the
+/// second of those is covered by cancelling the model's task rather than by the sleeper
+/// refusing to wait.
+actor BeatSleeper: Sleeping {
+    /// Every wait the model asked for, in order. One per successful clean.
+    private(set) var slept: [TimeInterval] = []
+    /// Runs while the model is "asleep" — the one window onto a card in its result state.
+    private let whileAsleep: @Sendable () async -> Void
+
+    init(whileAsleep: @escaping @Sendable () async -> Void = {}) {
+        self.whileAsleep = whileAsleep
+    }
+
+    func sleep(seconds: TimeInterval) async throws {
+        slept.append(seconds)
+        await whileAsleep()
+    }
+}
+
+/// A look at the model from **inside** the beat, and a place to act on it from there.
+///
+/// The beat is the one moment the deck is stopped on a card that has already been answered:
+/// the decision is recorded, the scan is pruned, the cache is written, and the card is still
+/// on screen with its rows drained and its "8.5 GB → 0 GB" headline. Every rule about that
+/// state has to be asserted there, and by the time a test's `await waitUntilIdle` returns the
+/// card has gone.
+///
+/// The model is handed over after the fact because the sleeper has to exist before the model
+/// does. `look()` records rather than asserting, so a failure is reported against the test
+/// rather than from inside a task.
+@MainActor
+final class BeatWatcher {
+    /// Set by the test the moment the model is built.
+    var model: AppModel?
+    /// The cache the model writes, so a test can see that the prune reached the disk before
+    /// the beat ended rather than after it.
+    var cache: ScanCache?
+    /// Anything the test wants to happen while the card is showing its result: a `cancel()`,
+    /// a scan that must be refused, a press of "Go through skipped again".
+    var duringTheBeat: () -> Void = {}
+
+    private(set) var looks = 0
+    private(set) var cardID: String?
+    private(set) var headline: SizeHeadline?
+    private(set) var confirmation: String?
+    /// One per row of the card on screen, through the rule the window really calls — with no
+    /// progress at all, so only the run's record can be what drains them.
+    private(set) var drainedRows: [Bool] = []
+    private(set) var decisions: [String: ProjectDecision] = [:]
+    private(set) var sessionBytes: Int64 = 0
+    private(set) var rowsOnScreen: Int?
+    private(set) var storedRows: Int?
+    private(set) var wasBusy = false
+    private(set) var wasHeld = false
+
+    func look() {
+        guard let model else { return }
+        looks += 1
+        let result = model.currentCardResult
+        let card = model.currentProjectCard
+        cardID = card?.id
+        headline = card?.headline(afterRun: result)
+        confirmation = result?.confirmation
+        drainedRows = (card?.folders ?? []).map {
+            ProjectCard.isFolderDrained($0, progress: nil, result: result)
+        }
+        decisions = model.projectDecisions
+        sessionBytes = model.deckSessionBytes
+        rowsOnScreen = model.result?.items.count
+        storedRows = cache?.load()?.items.count
+        wasBusy = model.isBusy
+        wasHeld = model.cardAwaitingAcknowledgement != nil
+        duringTheBeat()
+    }
+}
+
 // MARK: - waiting for the model's own tasks
 
 /// Spins until `condition` holds and gives up after five seconds, answering whether it held.

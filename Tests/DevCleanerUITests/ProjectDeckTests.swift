@@ -1514,6 +1514,318 @@ private func slots(_ pairs: [(String, Int64)]) -> [ProjectDeckSlot] {
         == "Cleaning… 2 of 8")
 }
 
+// MARK: - what the card shows once its run is over
+
+// The card used to show nothing about a finished run. The bars drained on the report, the
+// report was cleared the moment the run ended, and the card went back to the offer it had
+// been showing before the button was pressed — every bar full over folders that had gone,
+// under the same big number. The user pressed "Delete 8.5 GB for good", watched the bar
+// drain and refill, and asked whether the space had really been purged.
+//
+// `CardRunResult` is what answers them, and every rule in it reads the run's **record**.
+
+/// The runtime card out of the user's own report: one row, 8.5 GB, no path — so `simctl
+/// runtime delete` is the deletion and there is no Trash for it.
+private func runtimeCard() throws -> ProjectCard {
+    try #require(deck([
+        runtimeRow(name: "iOS 26.5", identifier: "iOS-26-5", sizeBytes: 8_494_282_293),
+    ]).cards.first)
+}
+
+/// A derived data card holding two folders, so one of them can be refused while the other
+/// goes. 8.5 GB as well, to keep the pair readable beside the runtime above.
+private func twoFolderCard() throws -> ProjectCard {
+    try #require(deck([
+        toolRow(name: "ModuleCache",
+                relativePath: "Library/Developer/Xcode/DerivedData/ModuleCache",
+                sizeBytes: 7_300_000_000),
+        toolRow(name: "Live", relativePath: "Library/Developer/Xcode/DerivedData/Live",
+                sizeBytes: 1_200_000_000),
+    ]).cards.first)
+}
+
+/// **The answer to "did that button do anything?"**: what the card held, an arrow, and what is
+/// left of it.
+@Test func theHeadlineAfterARunIsWhatWasThereAndWhatIsLeft() throws {
+    let card = try runtimeCard()
+    let row = try #require(card.items.first)
+
+    let result = CardRunResult(
+        card: card, record: makeRecord([runEntry(of: row, outcome: .deleted)]))
+
+    // "8.5 GB → 0 GB", in three pieces: the quiet half, the numeral at 96 points, the unit
+    // at 40.
+    #expect(result.headline.before == "8.5 GB →")
+    #expect(result.headline.number == "0")
+    #expect(result.headline.unit == "GB")
+    #expect(result.headline.trailingText == "GB")
+    // Not a checklist page's two figures: those share one unit because they are a part and
+    // its whole, and these two are the same thing measured before and after.
+    #expect(result.headline.outOf == nil)
+}
+
+/// **Zero is written in the scale of what was there.** Each side in its own scale, a card that
+/// went from 8.5 GB to nothing would read "8.5 GB → 0 KB" — a new unit to parse at exactly the
+/// moment the user is checking whether the thing worked.
+@Test func whatIsLeftIsWrittenInTheScaleOfWhatWasThere() {
+    #expect(SizeHeadline(before: 8_494_282_293, after: 0).unit == "GB")
+    #expect(SizeHeadline(before: 8_494_282_293, after: 0).number == "0")
+    // A remainder smaller than the scale is the part of the whole that it is, not a figure in
+    // its own unit: "0.4", never "400".
+    #expect(SizeHeadline(before: 8_494_282_293, after: 400_000_000).number == "0.4")
+    #expect(SizeHeadline(before: 8_494_282_293, after: 400_000_000).unit == "GB")
+    // A card measured in megabytes counts in whole megabytes on both sides.
+    #expect(SizeHeadline(before: 946_000_000, after: 0).before == "946 MB →")
+    #expect(SizeHeadline(before: 946_000_000, after: 0).number == "0")
+    #expect(SizeHeadline(before: 946_000_000, after: 0).unit == "MB")
+    #expect(SizeHeadline(before: 946_000_000, after: 120_000_000).number == "120")
+    // Never "0.0": the numeral is set at 96 points and a decimal place there is precision
+    // about nothing. The same rule the checklist page's ticked figure follows.
+    #expect(SizeHeadline(before: 2_000_000_000, after: 0).number == "0")
+}
+
+/// A partial failure says so in the headline: the refused folder's bytes are exactly what is
+/// left, because they are exactly what is still on the disk.
+@Test func aRunThatLeftSomethingBehindSaysHowMuch() throws {
+    let card = try twoFolderCard()
+    let moduleCache = try #require(card.items.first { $0.name == "ModuleCache" })
+    let live = try #require(card.items.first { $0.name == "Live" })
+
+    let result = CardRunResult(card: card, record: makeRecord([
+        runEntry(of: moduleCache, outcome: .trashed),
+        runEntry(of: live, outcome: .failed, reason: "refused: the guard said no"),
+    ]))
+
+    #expect(result.headline.before == "8.5 GB →")
+    #expect(result.headline.number == "1.2")
+    #expect(result.headline.unit == "GB")
+    // And the card is held, because a refused folder is still there and still inside the
+    // total the user was promised.
+    #expect(result.holdsTheCard)
+    #expect(result.problems == ["Live: refused: the guard said no"])
+}
+
+/// A run that removed nothing at all leaves the amount where it was, and confirms nothing:
+/// the problem lines are the whole report, and a confirmation over them would be the card
+/// contradicting itself.
+@Test func aRunThatRemovedNothingLeavesTheAmountAloneAndConfirmsNothing() throws {
+    let card = try runtimeCard()
+    let row = try #require(card.items.first)
+
+    let result = CardRunResult(card: card, record: makeRecord([
+        runEntry(of: row, outcome: .skipped, reason: "the simulator is running"),
+    ]))
+
+    #expect(result.headline.before == "8.5 GB →")
+    #expect(result.headline.number == "8.5")
+    #expect(result.confirmation == nil)
+    #expect(result.holdsTheCard)
+}
+
+/// Until a run ends the headline is the card's **offer**, unchanged — which is what every
+/// card in the deck shows for the whole of its life before the button is pressed.
+@Test func theCardsHeadlineIsItsOwnOfferUntilARunEnds() throws {
+    let card = try runtimeCard()
+
+    #expect(card.headline(afterRun: nil) == card.totalHeadline)
+    #expect(card.headline(afterRun: nil).number == "8.5")
+    #expect(card.headline(afterRun: nil).before == nil)
+}
+
+/// **The rows the run removed stay drained, and the rows it refused go back to full.** This is
+/// the other half of what the user was reporting: every bar refilled the instant the run
+/// ended, including the ones whose folders were gone.
+@Test func theRowsThatWentStayDrainedAndTheRowsThatDidNotGoBackToFull() throws {
+    let card = try twoFolderCard()
+    let moduleCache = try #require(card.items.first { $0.name == "ModuleCache" })
+    let live = try #require(card.items.first { $0.name == "Live" })
+    let result = CardRunResult(card: card, record: makeRecord([
+        runEntry(of: moduleCache, outcome: .trashed),
+        runEntry(of: live, outcome: .failed, reason: "refused: the guard said no"),
+    ]))
+
+    #expect(result.removed(moduleCache.id))
+    #expect(!result.removed(live.id))
+    // And through the rule the view actually calls, where the record replaces the report the
+    // moment there is one. The progress says both rows are done — it is the last report of a
+    // run over two items — and the record is what decides.
+    let finished = ExecutionProgress(completed: 2, total: 2, currentName: "Live")
+    let rows = card.folders
+    #expect(rows.map { ProjectCard.isFolderDrained($0, progress: finished, result: result) }
+        == [true, false])
+    // Before the run ends, the same rows follow the report, which is the one thing that
+    // knows anything then.
+    #expect(rows.map { ProjectCard.isFolderDrained($0, progress: finished, result: nil) }
+        == [true, true])
+    #expect(rows.map { ProjectCard.isFolderDrained($0, progress: nil, result: nil) }
+        == [false, false])
+}
+
+/// Where the rows went, in one sentence, chosen from the **record** — never from the Trash
+/// setting and never from what the button offered. A card claiming "deleted for good" over
+/// something sitting in the Trash is the one mistake the deck is most careful about.
+@Test func theConfirmationLineSaysWhereTheRowsReallyWent() throws {
+    let card = try twoFolderCard()
+    let moduleCache = try #require(card.items.first { $0.name == "ModuleCache" })
+    let live = try #require(card.items.first { $0.name == "Live" })
+
+    #expect(CardRunResult.confirmation(of: makeRecord([
+        runEntry(of: moduleCache, outcome: .trashed),
+        runEntry(of: live, outcome: .trashed),
+    ])) == "Moved to the Trash.")
+    #expect(CardRunResult.confirmation(of: makeRecord([
+        runEntry(of: moduleCache, outcome: .deleted),
+    ])) == "Deleted for good.")
+    // One card whose rows did not all land in the same place: `avdmanager delete avd`
+    // removes an emulator outright, and the fallback used when the Android command line
+    // tools are missing trashes its files instead.
+    #expect(CardRunResult.confirmation(of: makeRecord([
+        runEntry(of: moduleCache, outcome: .deleted),
+        runEntry(of: live, outcome: .trashed),
+    ])) == "Some moved to the Trash, the rest deleted for good.")
+    #expect(CardRunResult.confirmation(of: makeRecord([
+        runEntry(of: moduleCache, outcome: .failed, reason: "no"),
+        runEntry(of: live, outcome: .skipped, reason: "no"),
+    ])) == nil)
+    #expect(CardRunResult.confirmation(of: makeRecord([])) == nil)
+    // Counted off the entries and not off the bytes, so a row of nothing that really went is
+    // still confirmed rather than leaving the card silent about it.
+    let empty = makeItem(id: "other.libraryCaches|/tmp/empty", name: "empty", sizeBytes: 0)
+    #expect(CardRunResult.confirmation(of: makeRecord([
+        runEntry(of: empty, outcome: .trashed),
+    ])) == "Moved to the Trash.")
+}
+
+/// **A note that only restates what the card has already said does not hold the deck.**
+///
+/// The whole reason this state exists. After a successful "Delete 8.5 GB for good" the
+/// executor adds `Executor.Note.devicesWereRemovedPermanently`, every note used to hold the
+/// card behind "Next project", and what the user was left looking at was a full bar, the
+/// original amount and a sentence in orange — a success that reads as an error.
+@Test func aNoteThatOnlyRestatesTheOutcomeDoesNotHoldTheCard() throws {
+    let card = try runtimeCard()
+    let row = try #require(card.items.first)
+
+    let result = CardRunResult(card: card, record: makeRecord(
+        [runEntry(of: row, outcome: .deleted)],
+        notes: [Executor.Note.devicesWereRemovedPermanently]))
+
+    #expect(!result.holdsTheCard)
+    #expect(result.confirmation == "Deleted for good.")
+    // It is **not** thrown away: it stays on the run's own record for the session, and the
+    // engine has already written it to the run log.
+    #expect(result.problems == [Executor.Note.devicesWereRemovedPermanently])
+}
+
+/// Every other note still holds, including one this build has never seen — a note from a
+/// newer engine is by definition something new to say.
+@Test func aNoteWithSomethingNewToSayStillHoldsTheCard() throws {
+    let card = try runtimeCard()
+    let row = try #require(card.items.first)
+
+    #expect(CardRunResult(card: card, record: makeRecord(
+        [runEntry(of: row, outcome: .deleted)],
+        notes: [Executor.Note.xcodeWasOpen])).holdsTheCard)
+    #expect(CardRunResult(card: card, record: makeRecord(
+        [runEntry(of: row, outcome: .deleted)],
+        notes: [Executor.Note.runWasCancelled])).holdsTheCard)
+    // A run whose record could not be written: the screen is then the only place the user
+    // will ever see where these items went.
+    #expect(CardRunResult(card: card, record: makeRecord(
+        [runEntry(of: row, outcome: .deleted)],
+        notes: [CleanerService.runLogNotWritten + "the disk is full"])).holdsTheCard)
+    #expect(CardRunResult(card: card, record: makeRecord(
+        [runEntry(of: row, outcome: .deleted)],
+        notes: ["Something a later engine learned to say."])).holdsTheCard)
+
+    // Per row rather than as a whole list: the permanence note beside a real one does not
+    // excuse the real one.
+    let mixed = CardRunResult(card: card, record: makeRecord(
+        [runEntry(of: row, outcome: .deleted)],
+        notes: [Executor.Note.devicesWereRemovedPermanently, Executor.Note.xcodeWasOpen]))
+    #expect(mixed.holdsTheCard)
+    #expect(mixed.problems == [
+        Executor.Note.devicesWereRemovedPermanently, Executor.Note.xcodeWasOpen,
+    ])
+}
+
+/// The rule matches the **engine's own constant**, so the sentence stays the executor's to
+/// reword. Spelled out here as prose, a comma fixed in `CleanerCore` would start holding
+/// successful cards again with nothing to say why.
+@Test func thePermanenceNoteIsRecognisedByTheConstantRatherThanByItsWords() {
+    #expect(!ProjectDeckText.noteHoldsTheCard(Executor.Note.devicesWereRemovedPermanently))
+    // The *warning* shown before a run is a different sentence about the same fact, and it
+    // never reaches a record — so nothing here is keyed on it, and a note that happened to
+    // carry it would hold the card like any other unknown note.
+    #expect(ProjectDeckText.noteHoldsTheCard(
+        CleanerService.Warning.devicesAreRemovedPermanently))
+}
+
+/// Per-row reasons first, then the notes: a refused row is the one the user can usually do
+/// something about, and the notes are context. The list is the same one
+/// `ProjectDecision.cleaned` carries, so the report on screen and the session's record of the
+/// run cannot part company.
+@Test func theProblemLinesPutTheRowsFirstAndTheNotesAfterThem() throws {
+    let card = try twoFolderCard()
+    let moduleCache = try #require(card.items.first { $0.name == "ModuleCache" })
+    let live = try #require(card.items.first { $0.name == "Live" })
+
+    let result = CardRunResult(card: card, record: makeRecord([
+        runEntry(of: moduleCache, outcome: .failed, reason: "the guard said no"),
+        runEntry(of: live, outcome: .skipped, reason: "you cancelled the run"),
+    ], notes: [Executor.Note.xcodeWasOpen]))
+
+    // Skipped before failed, which is `RunRecord.unfinishedReasons`' own order: a skipped row
+    // is the one with something to fix.
+    #expect(result.problems == [
+        "Live: you cancelled the run",
+        "ModuleCache: the guard said no",
+        Executor.Note.xcodeWasOpen,
+    ])
+}
+
+/// **A checklist page reads what was ticked, then what is left of it.** The page's other
+/// figure — "of 3.3 GB", what there was to choose from — is gone from the headline once the
+/// choosing is over: the press was about the ticked rows, and those are what the card now has
+/// to account for.
+@Test func theChecklistPagesResultMeasuresWhatWasTicked() throws {
+    let dealt = try #require(deck(largeFiles()).cards.first { $0.isChecklist })
+    let pdf = try #require(dealt.folders.first { $0.name == "scan.pdf" })
+    let db = try #require(dealt.folders.first { $0.name == "cards.db" })
+    // Two of the four ticked: 1.2 GB and 876 MB.
+    let card = dealt.applyingTicks(tickedIDs: [pdf.id, db.id])
+    #expect(card.totalHeadline.number == "2.1")
+    #expect(card.totalHeadline.outOf == "of 3.3 GB")
+
+    let result = CardRunResult(card: card, record: makeRecord([
+        runEntry(of: try #require(card.items.first { $0.id == pdf.id }), outcome: .trashed),
+        runEntry(of: try #require(card.items.first { $0.id == db.id }), outcome: .trashed),
+    ]))
+
+    #expect(result.headline.before == "2.1 GB →")
+    #expect(result.headline.number == "0")
+    #expect(result.headline.unit == "GB")
+    #expect(result.headline.outOf == nil)
+    #expect(result.confirmation == "Moved to the Trash.")
+    // The rows the user left unticked were in no run, so they are not drained — their files
+    // are still there, and the page still draws them.
+    #expect(card.folders.map { ProjectCard.isFolderDrained($0, progress: nil, result: result) }
+        == [true, true, false, false])
+}
+
+/// The card's own words for what happened, in the past tense and in sentence case, like every
+/// other sentence in this file. No "successfully", and nothing in orange: the line this
+/// replaces in the user's report *was* orange, which is what made a success read as a failure.
+@Test func theCardSaysTheseExactWordsAboutAFinishedRun() {
+    #expect(ProjectDeckText.movedToTheTrash == "Moved to the Trash.")
+    #expect(ProjectDeckText.deletedForGood == "Deleted for good.")
+    #expect(ProjectDeckText.movedAndDeleted
+        == "Some moved to the Trash, the rest deleted for good.")
+    // The arrow travels with the amount it points away from, so the view cannot print one
+    // pointing the wrong way — or leave it out and turn the headline into two bare numbers.
+    #expect(ProjectDeckText.headlineBefore("8.5 GB") == "8.5 GB →")
+}
+
 // MARK: - the rest of the copy
 
 /// The deck's chrome, pinned here because the view is a separate target that a test cannot

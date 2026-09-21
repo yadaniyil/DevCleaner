@@ -21,9 +21,16 @@ public final class AppModel {
     /// latest progress report so the view has something to say beyond a spinner.
     ///
     /// A finished run is deliberately not one of these. A card's clean ends by recording a
-    /// decision and dealing the next card; where it left something behind, the card is held
-    /// by `cardAwaitingAcknowledgement` instead. Neither is a phase, because the phase is
-    /// what `isBusy` reads and both of those states leave the app free to scan.
+    /// decision, showing the card what the run did for `cardResultSeconds` and then dealing
+    /// the next card; where it left something behind, the card is held by
+    /// `cardAwaitingAcknowledgement` instead. Neither of those is a phase, because the phase
+    /// is what `isBusy` reads and a held card leaves the app free to scan.
+    ///
+    /// The **beat** is the one place that reads oddly out of context: it happens inside the
+    /// run's own task, so the phase is still `.running` throughout it and `isBusy` is still
+    /// true. That is deliberate rather than incidental — it is what keeps both of the card's
+    /// buttons dead while it is showing its result, and what makes `waitForWork()` mean
+    /// "everything about that clean is over".
     public enum Phase: Sendable, Equatable {
         case idle
         case scanning(ScanProgress?)
@@ -108,6 +115,23 @@ public final class AppModel {
     /// depend on a moment in time that nothing publishes a change for.
     @ObservationIgnored private var cardBecameCurrentAt: Date?
 
+    /// The card whose run has just ended, and what the run did to it.
+    ///
+    /// **The one fact the card draws its "after" from**, and the reason it exists is that
+    /// there used to be no such fact. A run ended, `cardRun` was cleared, and the card went
+    /// back to the offer it had been showing before the button was pressed: every bar full
+    /// again over folders that had gone, and the same big number. The user pressed "Delete
+    /// 8.5 GB for good", watched the bars drain, watched them refill, and asked whether the
+    /// space had really been purged.
+    ///
+    /// Set the instant the run ends and held until the deck moves on, which is one of two
+    /// things: `cardResultSeconds` — the beat — on a clean that went through, or Next on one
+    /// that did not. While it is set it **is** the card on screen: see `currentProjectCard`.
+    ///
+    /// Everything about it is read out of the run's own `RunRecord` — see `CardRunResult` —
+    /// never out of the progress reports, which are about what the run was *doing*.
+    public private(set) var cardResult: (card: ProjectCard, result: CardRunResult)?
+
     /// The card whose clean left something behind, and the lines saying what.
     ///
     /// The deck stops on that card until the user presses Next. Advancing straight past it
@@ -115,7 +139,28 @@ public final class AppModel {
     /// project over the top of it — and a refused folder is exactly the thing the user has
     /// to know about, because it is still on the disk and still in the total they were
     /// promised.
-    public private(set) var cardAwaitingAcknowledgement: (card: ProjectCard, problems: [String])?
+    ///
+    /// **Derived from `cardResult` rather than stored beside it**, because it is the same
+    /// fact asked a narrower question — "is the deck stopped here?" — and two stored copies
+    /// could disagree about it. `CardRunResult.holdsTheCard` is where the rule lives, and the
+    /// change it carries is that a run note which only restates what the card already said
+    /// no longer stops anything: a successful permanent deletion used to be held behind
+    /// "Next project" under the executor's "were removed outright" sentence in orange, which
+    /// reads as a failure.
+    public var cardAwaitingAcknowledgement: (card: ProjectCard, problems: [String])? {
+        guard let cardResult, cardResult.result.holdsTheCard else { return nil }
+        return (cardResult.card, cardResult.result.problems)
+    }
+
+    /// What the card on screen has to say about the run that has just ended on it, or `nil`
+    /// when no run has just ended on it.
+    ///
+    /// The window's one way in. It needs no card to match against, because whenever
+    /// `cardResult` is set the card on screen is that card — `currentProjectCard` returns it
+    /// — so a view asking "is this result mine?" would be asking a question with one answer.
+    /// That is the opposite of `cardRun`, which names its card precisely because a run can
+    /// belong to somebody else.
+    public var currentCardResult: CardRunResult? { cardResult?.result }
 
     /// Whether anything landed in the Trash this session under a name Finder hides — one
     /// beginning with a dot. Read out of each run's own record, so it is about what really
@@ -161,6 +206,10 @@ public final class AppModel {
     private let engine: any CleanerEngine
     private let cache: ScanCache
     private let clock: @Sendable () -> Date
+    /// How the card's result beat waits. Injected for the reason `BackgroundScanLoop`'s is:
+    /// `cardResultSeconds` is under a second, but seventy cleans in a test suite are not, and
+    /// a suite that really slept could not say when the beat had started or ended either.
+    private let sleeper: any Sleeping
     public let home: String
     private var work: Task<Void, Never>?
     /// The background loop, which owns the schedule. `weak` because it owns this model in
@@ -175,12 +224,14 @@ public final class AppModel {
         engine: any CleanerEngine,
         cache: ScanCache,
         home: String = FileManager.default.homeDirectoryForCurrentUser.path,
-        clock: @escaping @Sendable () -> Date = { Date() }
+        clock: @escaping @Sendable () -> Date = { Date() },
+        sleeper: any Sleeping = TaskSleeper()
     ) {
         self.engine = engine
         self.cache = cache
         self.home = home
         self.clock = clock
+        self.sleeper = sleeper
         self.settings = engine.settings()
         // Spec §9: the app opens instantly with the last cached result — a deck to work
         // through and an amount in the menu bar. Reading one small JSON file is the whole of
@@ -401,10 +452,13 @@ public final class AppModel {
 
     /// The card on screen: the first one this session has not answered.
     ///
-    /// A card whose clean left problems behind holds the deck here until the user presses
-    /// Next, although its decision is already recorded — see `cardAwaitingAcknowledgement`.
+    /// A card whose run has just ended holds the deck here although its decision is already
+    /// recorded — for `cardResultSeconds` when the run went through, and until the user
+    /// presses Next when it did not. `cardResult` is what keeps it here, and it is the one
+    /// thing that has to be asked before the decisions, because the card being shown its own
+    /// result is by definition a card that has been answered.
     public var currentProjectCard: ProjectCard? {
-        if let awaiting = cardAwaitingAcknowledgement { return awaiting.card }
+        if let cardResult { return cardResult.card }
         return sessionCards.first { projectDecisions[$0.id] == nil }
     }
 
@@ -541,7 +595,8 @@ public final class AppModel {
 
     /// Starts cleaning the card on screen. Returns whether it started. The app's one clean.
     ///
-    /// It records no run summary. The next card is the answer, and there is no panel
+    /// It records no run summary. The card itself is the answer — for `cardResultSeconds` it
+    /// shows what the run did to it, drained rows and "8.5 GB → 0 GB" — and there is no panel
     /// anywhere that would draw one.
     ///
     /// It does not ask for a rescan. A scan takes about 51 seconds, and a rescan between
@@ -555,10 +610,14 @@ public final class AppModel {
     ///
     /// Clean up is the window's default action, so Return presses it — and macOS repeats a
     /// held key about thirty times a second. Nothing else stands in the way: there is no
-    /// confirmation, the run is fast on a fake and quick enough on a real project, and
-    /// `phase` returns to `.idle` the instant it ends. A user who held Return for a second
-    /// cleaned project after project, each decision taken while the next card was still
-    /// animating in, and the only record of what went was the Trash.
+    /// confirmation, and the run is fast on a fake and quick enough on a real project. A user
+    /// who held Return for a second cleaned project after project, each decision taken while
+    /// the next card was still animating in, and the only record of what went was the Trash.
+    ///
+    /// `cardResultSeconds` now stands in the way as well, and it is not a substitute: the
+    /// beat is time the app is busy rather than time this window is counting, so the two add
+    /// up rather than overlapping. This one is still what a test can read, and still what
+    /// holds if the beat is ever shortened to nothing.
     ///
     /// 0.6 seconds, against a key-repeat delay of about 0.25 and a repeat interval of about
     /// 0.03, and about twice the 0.28-second deal animation — so by the time the button
@@ -581,6 +640,34 @@ public final class AppModel {
     /// test stepping a clock past it. It is an immutable number; the isolation this class
     /// carries is about its mutable state.
     public nonisolated static let cardSettleSeconds: TimeInterval = 0.6
+
+    /// How long a cleaned card stays on screen showing what the run did, before the deck
+    /// deals the next one.
+    ///
+    /// **The deck used to deal the next card in the same instant the run ended.** On a clean
+    /// with nothing to report that was the whole of the feedback: the bars the user was
+    /// watching drain refilled, the card faded, and the next project rose in — so the one
+    /// moment that says *it worked* never existed. The user's own words were "I'm not sure if
+    /// it works or if this space was really purged".
+    ///
+    /// 0.9 seconds, against the 0.28-second deal animation and the 0.45-second drain: long
+    /// enough for the drained bars to finish emptying and for "8.5 GB → 0 GB" and "Deleted
+    /// for good." to be read, short enough that somebody working through twenty-four cards
+    /// never waits for it. Both buttons are dead throughout — `isBusy` is still true — so the
+    /// beat cannot be answered through, and `cardSettleSeconds` then starts when the next
+    /// card arrives.
+    ///
+    /// **Only the dealing waits.** The decision, the session totals, the prune and the cache
+    /// write all happen the moment the run ends, before this: the truth about the disk is not
+    /// something to hold back for a beat, and a window closed mid-beat must not lose it.
+    ///
+    /// A card being **held** for its problems gets no beat. It is already stopped, for longer
+    /// and with a button to press, and a beat before the report would delay the one thing the
+    /// user has to read.
+    ///
+    /// `nonisolated` for the same reason `cardSettleSeconds` is: it is an immutable number,
+    /// and a test stepping past it should not need the actor.
+    public nonisolated static let cardResultSeconds: TimeInterval = 0.9
 
     @discardableResult
     public func cleanCurrentProject() -> Bool {
@@ -637,15 +724,35 @@ public final class AppModel {
             // `clean(items:)`, never `cleanDefault`: this is one project out of a scan of
             // the whole machine, so the engine must remove exactly what it is handed.
             let record = await engine.clean(items: items, now: startedAt, progress: report)
-            let removed = Self.removedItemIDs(of: record)
-            let pruned = result.map { Self.pruning($0, removing: removed) }
+            // The record read against the card it came from, once, here — so the bars the
+            // card drains, the amount it says is left and the rows the scan is pruned by are
+            // all one reading of one run.
+            let outcome = CardRunResult(card: card, record: record)
+            let pruned = result.map { Self.pruning($0, removing: outcome.removedItemIDs) }
             // Off the main actor and before anything is drawn, exactly as the scan's write
             // is: the redraw must not wait on a disk that is busy.
             var cacheError: String?
             if let pruned { cacheError = await Self.store(pruned, in: cache) }
+            // **Truth first.** Everything the run means is applied here, before the beat:
+            // the decision, the session totals, the pruned scan and the cache error. A
+            // window closed or a `cancel()` arriving during the beat therefore costs the
+            // user nothing but the beat.
+            landCardRun(card, record: record, outcome: outcome, cacheError: cacheError,
+                        pruned: pruned)
+            // The beat: the card keeps its result for a moment so the user can see that the
+            // press did something. Its own awaited step, inside `work` and above the line
+            // below, which is what lets a test see the state on both sides of it —
+            // `waitForWork()` and `isBusy` both cover it, and nothing is mutated after the
+            // phase clears.
+            //
+            // The throw is **swallowed**, unlike the loop's: a cancelled beat is a beat cut
+            // short, and a `return` here would leave `phase` on `.running` for the rest of
+            // the session with Clean up and Scan again dead behind it.
+            if !outcome.holdsTheCard {
+                try? await sleeper.sleep(seconds: Self.cardResultSeconds)
+            }
             // Nothing goes below this line — no test can see it. The reason is on `finishRun`.
-            finishCardRun(
-                card, record: record, pruned: pruned, cacheError: cacheError)
+            finishCardRun(holding: outcome.holdsTheCard)
         }
         return true
     }
@@ -698,7 +805,10 @@ public final class AppModel {
     /// reached, this one is the rule a test can read.
     public func acknowledgeProblems() {
         guard cardAwaitingAcknowledgement != nil, currentCardHasSettled else { return }
-        cardAwaitingAcknowledgement = nil
+        // The whole result goes, not only the problem lines: the card is leaving, and the
+        // next one must not be dealt over a drained bar and a "→ 0 GB" belonging to the
+        // project before it.
+        cardResult = nil
         deckAdvanced()
         // Asked here as well, because the card being held was the last one: until Next is
         // pressed there is a card on screen, so the end of the deck had not arrived yet.
@@ -714,22 +824,33 @@ public final class AppModel {
     /// The one rescan this session gets is **not** re-armed. The deck the user is going
     /// back through was measured a moment ago, and a second 51-second scan is the last
     /// thing a second pass needs.
+    ///
+    /// Refused while a clean is running — including the beat a finished card holds its result
+    /// for — and while a card is being held for its problems, the same two conditions Skip
+    /// and Clean up refuse under. The button is only ever on the end card, so neither state
+    /// can be reached by clicking; the guard is here because forgetting every skip while a
+    /// run is in flight would deal a card out from under it, and a model that answers the
+    /// question is a model a test can ask. A background **scan** does not refuse it, for the
+    /// reason `skipCurrentProject` gives: it runs unasked for about 51 seconds and the deck
+    /// is still the user's.
     public func reviewSkippedProjects() {
+        guard !isCleaningProject, cardAwaitingAcknowledgement == nil else { return }
         projectDecisions = projectDecisions.filter { $0.value != .skipped }
         // A card arrives under the cursor the moment this returns, and the button that was
         // just pressed sits where Clean up will be — so the same settle window applies.
         deckAdvanced()
     }
 
-    /// Ends a card's clean: records what happened, prunes what went, and holds the card if
-    /// anything was left behind.
+    /// Applies everything a card's clean **means**, the instant the run ends: the decision,
+    /// the session totals, the pruned scan, and the result the card now shows.
     ///
-    /// **Nothing may be added after the call to this from `cleanCurrentProject`'s task**,
-    /// for the reason spelled out on `finishRun`: every test waits on `!isBusy`, which this
-    /// satisfies the instant it clears the phase, so a statement after the call runs
-    /// unobserved and a mutation of it survives.
-    private func finishCardRun(
-        _ card: ProjectCard, record: RunRecord, pruned: ScanResult?, cacheError: String?
+    /// Split from `finishCardRun` so the beat can sit between the two. Everything true about
+    /// the disk lands here, before any waiting; the other half only takes the card away. So a
+    /// window closed during the beat, a `cancel()`, or a crash costs the user the beat and
+    /// nothing else — the cache on disk already agrees with what went.
+    private func landCardRun(
+        _ card: ProjectCard, record: RunRecord, outcome: CardRunResult,
+        cacheError: String?, pruned: ScanResult?
     ) {
         // What really went, out of the run's own record — never the card's total. A run can
         // be cancelled and a folder can be refused, and a session figure built from the
@@ -738,14 +859,14 @@ public final class AppModel {
         // The run's `notes` join the per-row problems, after them. They are not failures:
         // Xcode having been open, a run the user cancelled, devices removed outright. But
         // they are the things the session will not say again — nothing else in the app
-        // reports a finished run — and the card is held until
-        // the user presses Next, which is the only moment they are certain to be read.
-        // Per-row reasons come first because those are the ones with something to fix.
-        let problems = record.unfinishedReasons + record.notes
+        // reports a finished run — so they are kept on the decision whether or not they are
+        // what stops the deck. Per-row reasons come first because those are the ones with
+        // something to fix. `CardRunResult` is where both that order and the stopping rule
+        // live.
         projectDecisions[card.id] = .cleaned(
             trashedBytes: record.trashedBytes,
             deletedBytes: record.permanentlyDeletedBytes,
-            problems: problems)
+            problems: outcome.problems)
         // Where the folder LANDED, not where it came from. The executor renames a project's
         // build folder to "<project> – <folder>" on the way out, so a `.build` normally
         // arrives in the Trash visible and needs no note; `trashedTo` is the only thing that
@@ -757,39 +878,64 @@ public final class AppModel {
                 && ProjectDeckText.isHiddenInFinder($0.trashedTo ?? $0.target)
         }) { trashedHiddenFolders = true }
         if let pruned { apply(pruned) }
-        if !problems.isEmpty { cardAwaitingAcknowledgement = (card, problems) }
+        // The card stops being a question and becomes a report of what happened. It is still
+        // `currentProjectCard` while this is set, which is what keeps the drained bars and
+        // the "8.5 GB → 0 GB" headline on screen instead of the next project.
+        cardResult = (card, outcome)
         lastCacheError = cacheError
-        // The deck has moved, whether or not the next card is on screen yet, so the settle
-        // window opens here. Set even when the card is being held for its problems, where
-        // the button is "Next project" rather than Clean up: that button is the window's
-        // default action too, and `acknowledgeProblems` reads this timestamp for exactly
-        // that reason.
+        // A **held** card's settle window opens here, before its problems are on screen,
+        // rather than when the deck next moves. "Next project" is the window's default
+        // action, so the Return that started the clean is still down and its next repeat —
+        // about 33 ms later — would press it; `acknowledgeProblems` reads this timestamp for
+        // exactly that reason.
+        //
+        // A card with a beat gets its window when the **next** card is dealt, at the end of
+        // `finishCardRun`, because that is when a card arrives under the cursor. Its own
+        // buttons are dead throughout the beat — `isBusy` — so nothing needs holding back
+        // here.
         //
         // What this buys is a **delay**, not immunity. A held key goes on repeating, so the
         // window rate-limits it to one press per `cardSettleSeconds` and no more — see that
         // constant. Nothing here can stop a held key; only `DeckKeyboard`, which the window
         // applies to the events themselves, can.
-        deckAdvanced()
-        // Before the phase clears, so the unstructured task below is created while this is
+        if outcome.holdsTheCard { deckAdvanced() }
+    }
+
+    /// Takes the card away and gives the app back: the second half of a card's clean, after
+    /// the beat.
+    ///
+    /// `holding` is `CardRunResult.holdsTheCard`, and it decides the one thing left to
+    /// decide — whether the card goes now or waits for Next. It is passed rather than read
+    /// back off `cardResult` so this cannot disagree with the branch that chose to wait.
+    ///
+    /// **Nothing may be added after the call to this from `cleanCurrentProject`'s task**,
+    /// for the reason spelled out on `finishRun`: every test waits on `!isBusy`, which this
+    /// satisfies the instant it clears the phase, so a statement after the call runs
+    /// unobserved and a mutation of it survives. The beat is above the call for that reason
+    /// rather than below it.
+    private func finishCardRun(holding: Bool) {
+        if !holding {
+            // The beat is over: the result goes, the next card is dealt, and the window
+            // opens on it.
+            cardResult = nil
+            deckAdvanced()
+        }
+        // Before the phase clears, so the unstructured task inside is created while this is
         // still the last word on what the deck holds. Creating it is synchronous; it cannot
-        // run until this returns.
+        // run until this returns. A no-op while a card is being held, because a held card is
+        // a card on screen and the deck has therefore not run out.
         requestRescanIfTheDeckIsFinished()
-        // Both cleared last, together: they are one fact — "the deck's run is over" — and
-        // `cardRun` left behind would keep a finished card's folders struck through.
+        // Both cleared last, together: they are one fact — "the deck's run is over".
+        //
+        // **`cardRun` deliberately survives the beat**, which is why it is cleared here and
+        // not in `landCardRun`. It is what tells the window the run on screen is this card's,
+        // and the primary button's title follows it: kept, the button reads "Cleaning… 8 of
+        // 8" for the length of the beat, which is true and finished. Cleared a beat early it
+        // would go back to "Delete 8.5 GB for good" — a live-looking offer, over a card whose
+        // rows have just been struck through, for 0.9 seconds.
         cardRun = nil
         phase = .idle
         work = nil
-    }
-
-    /// The identifiers of the rows a run really removed.
-    ///
-    /// `.trashed` and `.deleted` only. A `.failed` or `.skipped` row is still on the disk,
-    /// and pruning it would take a real folder out of both surfaces' totals and off its own
-    /// card — so the space would look recovered and the folder would never be offered again.
-    static func removedItemIDs(of record: RunRecord) -> Set<String> {
-        Set(record.entries
-            .filter { $0.outcome == .trashed || $0.outcome == .deleted }
-            .map(\.itemID))
     }
 
     /// The scan without the rows a run removed.

@@ -32,7 +32,7 @@ final class MovableClock: @unchecked Sendable {
 /// It throws once it has slept `stopsAfter` times. That is how every test in this file
 /// ends: the loop runs for ever by design, so a test that waited for it to return on its
 /// own would hang, and a hanging test is a failure nobody can read.
-actor FakeSleeper: ScanLoopSleeping {
+actor FakeSleeper: Sleeping {
     /// Every wait the loop asked for, in order.
     private(set) var slept: [TimeInterval] = []
     /// Set when the loop came back for a sleep after being told to stop. Recorded and

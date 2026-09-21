@@ -34,13 +34,20 @@ private func threeProjects() -> [CleanupItem] {
 ///
 /// `clock` is injected for the tests that have to move time — the settle window after a card
 /// is answered is measured against it.
+///
+/// `sleeper` is injected for the beat a cleaned card holds its result for, and it defaults to
+/// one that waits for nothing: every clean below would otherwise take
+/// `AppModel.cardResultSeconds` of real time. A test that wants to look at the card *during*
+/// the beat passes a `BeatSleeper` with a `whileAsleep` closure.
 @MainActor
 private func makeDeckModel(
     _ rows: [CleanupItem], cache: ScanCache, engine: FakeEngine,
-    clock: @escaping @Sendable () -> Date = { now }
+    clock: @escaping @Sendable () -> Date = { now },
+    sleeper: any Sleeping = BeatSleeper()
 ) throws -> AppModel {
     try cache.save(makeResult(rows))
-    return AppModel(engine: engine, cache: cache, home: testHome, clock: clock)
+    return AppModel(
+        engine: engine, cache: cache, home: testHome, clock: clock, sleeper: sleeper)
 }
 
 /// Moves a test's clock past the window `cleanCurrentProject` refuses inside.
@@ -663,7 +670,8 @@ private func mixedRows() -> [CleanupItem] {
                     problems: ["ios/Pods: refused: the guard said no"]))
 }
 
-/// A clean that went through holds nothing, so the next card is dealt straight away.
+/// A clean that went through holds nothing, so the next card is dealt after the beat and no
+/// button has to be pressed.
 @MainActor
 @Test func aCleanWithNoProblemsHoldsNothing() async throws {
     let temp = TempDir()
@@ -677,6 +685,357 @@ private func mixedRows() -> [CleanupItem] {
 
     #expect(model.cardAwaitingAcknowledgement?.card == nil)
     #expect(model.currentProjectCard?.name == "tool")
+    // And nothing of the finished run is left on the new card.
+    #expect(model.cardResult?.card == nil)
+    #expect(model.currentCardResult == nil)
+}
+
+// MARK: - the beat a cleaned card holds its result for
+
+// The deck used to deal the next card in the same instant a run ended. On a clean with
+// nothing to report that was the whole of the feedback: the bars the user was watching
+// drain refilled, the card faded and the next project rose in — so the one moment that says
+// *it worked* never existed. "I'm not sure if it works or if this space was really purged."
+//
+// Every test here uses `BeatSleeper`, which waits for nothing, and `BeatWatcher`, which is
+// the only way to see the card while the deck is stopped on its own result.
+
+@MainActor
+@Test func aSuccessfulCleanHoldsTheCardForABeatAndThenDealsTheNextOne() async throws {
+    let temp = TempDir()
+    let cache = ScanCache(directory: temp.url)
+    var engine = FakeEngine()
+    engine.recordsWhatItIsHanded = true
+    let watcher = BeatWatcher()
+    let sleeper = BeatSleeper(whileAsleep: { await watcher.look() })
+    let model = try makeDeckModel(
+        threeProjects(), cache: cache, engine: engine, sleeper: sleeper)
+    watcher.model = model
+
+    #expect(model.cleanCurrentProject())
+    #expect(await waitUntilIdle(model))
+
+    // One beat, of exactly the named length. Read off the sleeper, so a hard-coded 0.9 in
+    // the model would still be caught by the constant changing.
+    #expect(await sleeper.slept == [AppModel.cardResultSeconds])
+    // The card that was cleaned was still the card on screen while it waited…
+    #expect(watcher.looks == 1)
+    #expect(watcher.cardID == "\(testHome)/dev/site")
+    // …and both buttons were dead throughout, so the beat cannot be answered through.
+    #expect(watcher.wasBusy)
+    // Not held: there was nothing to report, so no button had to be pressed.
+    #expect(!watcher.wasHeld)
+    // And then it went, by itself.
+    #expect(model.currentProjectCard?.name == "tool")
+}
+
+/// **What the card shows during the beat**: the rows that went stay drained, and the number
+/// the user pressed a button about reads "9.0 GB → 0 GB".
+@MainActor
+@Test func theCardShowsWhatTheRunDidWhileTheBeatLasts() async throws {
+    let temp = TempDir()
+    let cache = ScanCache(directory: temp.url)
+    var engine = FakeEngine()
+    engine.recordsWhatItIsHanded = true
+    let watcher = BeatWatcher()
+    let sleeper = BeatSleeper(whileAsleep: { await watcher.look() })
+    let model = try makeDeckModel(
+        threeProjects(), cache: cache, engine: engine, sleeper: sleeper)
+    watcher.model = model
+
+    #expect(model.cleanCurrentProject())
+    #expect(await waitUntilIdle(model))
+
+    #expect(watcher.headline?.before == "9.0 GB →")
+    #expect(watcher.headline?.number == "0")
+    #expect(watcher.headline?.unit == "GB")
+    // The card's one row, drained — with **no progress report at all**, so the run's record
+    // is the only thing that could have drained it. That is the whole fix: the report is
+    // cleared when the run ends, and before this the bar refilled with it.
+    #expect(watcher.drainedRows == [true])
+    #expect(watcher.confirmation == "Moved to the Trash.")
+}
+
+/// **Truth first.** The decision, the session total, the pruned scan and the cache write all
+/// happen the moment the run ends — only the dealing of the next card waits. So a window
+/// closed mid-beat, or a crash, costs the user the beat and nothing else.
+@MainActor
+@Test func theDecisionAndThePruneAreDoneBeforeTheBeatStarts() async throws {
+    let temp = TempDir()
+    let cache = ScanCache(directory: temp.url)
+    var engine = FakeEngine()
+    engine.recordsWhatItIsHanded = true
+    let watcher = BeatWatcher()
+    let sleeper = BeatSleeper(whileAsleep: { await watcher.look() })
+    let model = try makeDeckModel(
+        threeProjects(), cache: cache, engine: engine, sleeper: sleeper)
+    watcher.model = model
+    watcher.cache = cache
+
+    #expect(model.cleanCurrentProject())
+    #expect(await waitUntilIdle(model))
+
+    #expect(watcher.decisions["\(testHome)/dev/site"]
+        == .cleaned(trashedBytes: 9_000_000_000, deletedBytes: 0, problems: []))
+    #expect(watcher.sessionBytes == 9_000_000_000)
+    // Pruned out of the scan on screen and out of the stored one, both already.
+    #expect(watcher.rowsOnScreen == 3)
+    #expect(watcher.storedRows == 3)
+}
+
+/// The settle window starts when the **next** card is dealt, not when the run ends.
+///
+/// The clock is moved past the whole window from inside the beat. If the window had opened
+/// when the decision was recorded it would already be spent by the time the new card arrives
+/// — and a held Return would clean the next project the instant it appeared, which is the
+/// exact failure `cardSettleSeconds` exists to prevent.
+@MainActor
+@Test func theSettleWindowStartsWhenTheNextCardIsDealt() async throws {
+    let temp = TempDir()
+    let cache = ScanCache(directory: temp.url)
+    var engine = FakeEngine()
+    engine.recordsWhatItIsHanded = true
+    let clock = MovableClock()
+    let sleeper = BeatSleeper(whileAsleep: {
+        clock.advance(by: AppModel.cardSettleSeconds * 2)
+    })
+    let model = try makeDeckModel(
+        threeProjects(), cache: cache, engine: engine, clock: clock.read, sleeper: sleeper)
+
+    #expect(model.cleanCurrentProject())
+    #expect(await waitUntilIdle(model))
+    #expect(model.currentProjectCard?.name == "tool")
+
+    #expect(!model.cleanCurrentProject())
+    handPauses(clock)
+    #expect(model.cleanCurrentProject())
+    #expect(await waitUntilIdle(model))
+    let cleans = await engine.log.cleans
+    #expect(cleans.count == 2)
+}
+
+/// Nothing may start while a card is showing its result: the app is still busy, which is what
+/// keeps both of the card's buttons dead and what `BackgroundScanLoop` reads before it scans.
+///
+/// A refused scan is not a wedge — `runOneScan` calls `abandonScan()` and the loop sleeps
+/// again, which `BackgroundScanLoopTests` covers from the other side. What matters here is
+/// that a 51-second scan cannot land on top of the card the user is being shown.
+@MainActor
+@Test func nothingElseCanStartWhileACardIsShowingItsResult() async throws {
+    let temp = TempDir()
+    let cache = ScanCache(directory: temp.url)
+    var engine = FakeEngine(result: makeResult([
+        folderRow(project: "fresh", folder: "build", sizeBytes: 5_000_000_000),
+    ]))
+    engine.recordsWhatItIsHanded = true
+    let watcher = BeatWatcher()
+    let sleeper = BeatSleeper(whileAsleep: { await watcher.look() })
+    let model = try makeDeckModel(
+        threeProjects(), cache: cache, engine: engine, sleeper: sleeper)
+    watcher.model = model
+    var startedAScan: Bool?
+    var startedASecondClean: Bool?
+    watcher.duringTheBeat = {
+        startedAScan = model.startScan()
+        startedASecondClean = model.cleanCurrentProject()
+        // And a skip cannot take the card out from under its own report.
+        model.skipCurrentProject()
+    }
+
+    #expect(model.cleanCurrentProject())
+    #expect(await waitUntilIdle(model))
+
+    #expect(startedAScan == false)
+    #expect(startedASecondClean == false)
+    #expect(watcher.cardID == "\(testHome)/dev/site")
+    // One clean, and the skip recorded nothing: the cleaned card's own decision stands.
+    let cleans = await engine.log.cleans
+    #expect(cleans.count == 1)
+    #expect(model.projectDecisions["\(testHome)/dev/tool"] == nil)
+    #expect(model.currentProjectCard?.name == "tool")
+}
+
+/// "Go through skipped again" is refused while a card is showing its result, the same rule
+/// Skip and Clean up follow. The button only ever exists on the end card, so this cannot be
+/// reached by clicking — but forgetting every skip while a run is in flight would deal a card
+/// out from under it, and a model that answers the question is a model a test can ask.
+@MainActor
+@Test func goingBackThroughSkippedIsRefusedWhileACardIsShowingItsResult() async throws {
+    let temp = TempDir()
+    let cache = ScanCache(directory: temp.url)
+    var engine = FakeEngine()
+    engine.recordsWhatItIsHanded = true
+    let clock = MovableClock()
+    let watcher = BeatWatcher()
+    let sleeper = BeatSleeper(whileAsleep: { await watcher.look() })
+    let model = try makeDeckModel(
+        threeProjects(), cache: cache, engine: engine, clock: clock.read, sleeper: sleeper)
+    watcher.model = model
+    watcher.duringTheBeat = { model.reviewSkippedProjects() }
+
+    model.skipCurrentProject()                          // site
+    handPauses(clock)
+    #expect(model.cleanCurrentProject())                // tool
+    #expect(await waitUntilIdle(model))
+
+    // The skip survived the beat, so the deck is where it was rather than back at the top.
+    #expect(model.projectDecisions["\(testHome)/dev/site"] == .skipped)
+    #expect(model.currentProjectCard?.name == "game")
+    // And it works once the beat is over.
+    handPauses(clock)
+    model.reviewSkippedProjects()
+    #expect(model.currentProjectCard?.name == "site")
+}
+
+/// A `cancel()` during the beat cuts the beat short and leaves the app idle with the next card
+/// dealt. Anything else would be worse than the beat: a `return` out of a cancelled sleep
+/// leaves `phase` on `.running` for the rest of the session, with Clean up and Scan again dead
+/// behind it and nothing on screen to say why.
+@MainActor
+@Test func cancellingDuringTheBeatStillDealsTheNextCard() async throws {
+    let temp = TempDir()
+    let cache = ScanCache(directory: temp.url)
+    var engine = FakeEngine()
+    engine.recordsWhatItIsHanded = true
+    let watcher = BeatWatcher()
+    let sleeper = BeatSleeper(whileAsleep: { await watcher.look() })
+    let model = try makeDeckModel(
+        threeProjects(), cache: cache, engine: engine, sleeper: sleeper)
+    watcher.model = model
+    watcher.duringTheBeat = { model.cancel() }
+
+    #expect(model.cleanCurrentProject())
+    #expect(await waitUntilIdle(model))
+
+    #expect(model.phase == .idle)
+    #expect(!model.isBusy)
+    #expect(model.currentProjectCard?.name == "tool")
+    #expect(model.currentCardResult == nil)
+    // What the run did stands: the cancel arrived after everything true about the disk had
+    // already been applied.
+    #expect(model.projectDecisions["\(testHome)/dev/site"]
+        == .cleaned(trashedBytes: 9_000_000_000, deletedBytes: 0, problems: []))
+    #expect(model.result?.items.count == 3)
+}
+
+/// **A card held for its problems gets no beat.** It is already stopped, for longer and with a
+/// button to press, and a beat in front of the report would delay the one thing the user has
+/// to read.
+@MainActor
+@Test func aCardHeldForItsProblemsWaitsForNoBeatAndUsesTheSameResultState() async throws {
+    let temp = TempDir()
+    let cache = ScanCache(directory: temp.url)
+    let rows = threeProjects()
+    let pods = try #require(rows.first { $0.name == "ios/Pods" })
+    var engine = FakeEngine()
+    engine.recordsWhatItIsHanded = true
+    engine.refusedItemIDs = [pods.id]
+    let clock = MovableClock()
+    let sleeper = BeatSleeper()
+    let model = try makeDeckModel(
+        rows, cache: cache, engine: engine, clock: clock.read, sleeper: sleeper)
+    model.skipCurrentProject()
+    model.skipCurrentProject()
+    handPauses(clock)
+
+    #expect(model.cleanCurrentProject())                // game: .build goes, ios/Pods refused
+    #expect(await waitUntilIdle(model))
+
+    #expect(await sleeper.slept.isEmpty)
+    // The same result state an auto-advancing card gets: the drained row stays drained, the
+    // refused one is full again, and the headline says how much is still there.
+    let result = try #require(model.currentCardResult)
+    let card = try #require(model.currentProjectCard)
+    #expect(card.folders.map { ProjectCard.isFolderDrained($0, progress: nil, result: result) }
+        == [true, false])
+    #expect(result.headline.before == "1.3 GB →")
+    #expect(result.headline.number == "0.4")
+    #expect(result.headline.unit == "GB")
+    #expect(result.confirmation == "Moved to the Trash.")
+    // Plus the problem lines and the button, exactly as before.
+    #expect(model.cardAwaitingAcknowledgement?.problems
+        == ["ios/Pods: refused: the guard said no"])
+
+    handPauses(clock)
+    model.acknowledgeProblems()
+
+    // The whole result goes with the card, so the next one is not dealt over a drained bar
+    // belonging to the project before it.
+    #expect(model.currentCardResult == nil)
+    #expect(model.cardResult?.card == nil)
+}
+
+/// **A successful permanent deletion is no longer held.** This is the report this whole state
+/// came from: the user pressed "Delete 8.5 GB for good", it worked, and the card they were
+/// left looking at was held behind "Next project" with a full bar, the original amount, and
+/// the executor's "were removed outright" sentence in orange.
+@MainActor
+@Test func aRunNoteThatOnlyRestatesTheDeletionDoesNotHoldTheCard() async throws {
+    let temp = TempDir()
+    let cache = ScanCache(directory: temp.url)
+    var engine = FakeEngine()
+    engine.recordsWhatItIsHanded = true
+    engine.runNotes = [Executor.Note.devicesWereRemovedPermanently]
+    let watcher = BeatWatcher()
+    let sleeper = BeatSleeper(whileAsleep: { await watcher.look() })
+    let model = try makeDeckModel(
+        [runtimeRow(name: "iOS 26.5", identifier: "iOS-26-5", sizeBytes: 8_494_282_293)],
+        cache: cache, engine: engine, sleeper: sleeper)
+    watcher.model = model
+    #expect(try #require(model.currentProjectCard).primaryActionTitle
+        == "Delete 8.5 GB for good")
+
+    #expect(model.cleanCurrentProject())
+    #expect(await waitUntilIdle(model))
+
+    // A beat rather than a hold, and what it showed is the run being reported as a success.
+    #expect(await sleeper.slept == [AppModel.cardResultSeconds])
+    #expect(!watcher.wasHeld)
+    #expect(watcher.headline?.before == "8.5 GB →")
+    #expect(watcher.headline?.number == "0")
+    #expect(watcher.headline?.unit == "GB")
+    #expect(watcher.drainedRows == [true])
+    #expect(watcher.confirmation == "Deleted for good.")
+    // The note is still on the session's record of the run — and the engine has already
+    // written it to the run log — it just does not stop the deck.
+    #expect(model.projectDecisions["ios.runtimes"]
+        == .cleaned(trashedBytes: 0, deletedBytes: 8_494_282_293,
+                    problems: [Executor.Note.devicesWereRemovedPermanently]))
+    #expect(model.cardAwaitingAcknowledgement?.card == nil)
+    #expect(model.currentProjectCard == nil)
+    #expect(model.deckSummary?.endDetailLines == ["8.5 GB deleted for good", "from 1 card"])
+}
+
+/// A note with something **new** to say still holds the card, beside the permanence one or
+/// on its own: Xcode having been open is a slow next build the user should not be surprised
+/// by, and nothing else in the app ever reports a finished run.
+@MainActor
+@Test func aRunNoteWithSomethingNewToSayStillHoldsTheCard() async throws {
+    let temp = TempDir()
+    let cache = ScanCache(directory: temp.url)
+    var engine = FakeEngine()
+    engine.recordsWhatItIsHanded = true
+    engine.runNotes = [
+        Executor.Note.devicesWereRemovedPermanently, Executor.Note.xcodeWasOpen,
+    ]
+    let sleeper = BeatSleeper()
+    let model = try makeDeckModel(
+        [runtimeRow(name: "iOS 26.5", identifier: "iOS-26-5", sizeBytes: 8_494_282_293)],
+        cache: cache, engine: engine, sleeper: sleeper)
+
+    #expect(model.cleanCurrentProject())
+    #expect(await waitUntilIdle(model))
+
+    #expect(await sleeper.slept.isEmpty)
+    let awaiting = try #require(model.cardAwaitingAcknowledgement)
+    #expect(awaiting.card.id == "ios.runtimes")
+    // Both lines are shown, in the order the record carries them. The redundant one is not
+    // worth stripping out of a card the user is stopping to read anyway.
+    #expect(awaiting.problems == [
+        Executor.Note.devicesWereRemovedPermanently, Executor.Note.xcodeWasOpen,
+    ])
+    // And it is still reported as the success it was.
+    #expect(model.currentCardResult?.confirmation == "Deleted for good.")
 }
 
 @MainActor
@@ -1145,8 +1504,8 @@ private func mixedRows() -> [CleanupItem] {
 }
 
 /// A report that lands after the card's run has ended does not reattach itself to whatever
-/// is running next — the next card's clean, most likely, since the deck deals one the moment
-/// this run ends.
+/// is running next — the next card's clean, most likely, since the deck deals one a beat
+/// after this run ends.
 @MainActor
 @Test func aCardRunReportArrivingLateIsDropped() async throws {
     let temp = TempDir()
@@ -1592,9 +1951,11 @@ private func largeFilePage() -> [CleanupItem] {
 /// user would make.
 @MainActor
 private func modelShowingTheChecklistPage(
-    _ rows: [CleanupItem], cache: ScanCache, engine: FakeEngine, clock: MovableClock
+    _ rows: [CleanupItem], cache: ScanCache, engine: FakeEngine, clock: MovableClock,
+    sleeper: any Sleeping = BeatSleeper()
 ) throws -> AppModel {
-    let model = try makeDeckModel(rows, cache: cache, engine: engine, clock: clock.read)
+    let model = try makeDeckModel(
+        rows, cache: cache, engine: engine, clock: clock.read, sleeper: sleeper)
     #expect(model.currentProjectCard?.isInterstitial == true)
     #expect(model.cleanCurrentProject())              // "Look through them"
     handPauses(clock)
@@ -1702,6 +2063,53 @@ private func modelShowingTheChecklistPage(
     // user made a decision about this page and it was carried out.
     #expect(model.currentProjectCard == nil)
     // And the ticks are forgotten with the scan they were about — see `AppModel.setResult`.
+    #expect(model.tickedChecklistIDs.isEmpty)
+}
+
+/// **The page's own result: what was ticked, then what is left of it.**
+///
+/// The card the beat shows is the page as it was **pressed** — ticks and all — even though the
+/// ticks themselves are forgotten the moment the pruned scan lands. So the rows the user
+/// ticked are struck through, the row they left alone is untouched, and the headline drops the
+/// page's "of 2.7 GB": the choosing is over, and what the card has to account for is the
+/// choice it acted on.
+@MainActor
+@Test func theChecklistPagesBeatShowsWhatWentAndLeavesTheRestAlone() async throws {
+    let temp = TempDir()
+    let cache = ScanCache(directory: temp.url)
+    let rows = largeFilePage()
+    let database = try #require(rows.first { $0.name == "cards.db" })
+    let scan = try #require(rows.first { $0.name == "scan.pdf" })
+    let frames = try #require(rows.first { $0.name == "gallery_1fps.rgb" })
+    var engine = FakeEngine()
+    engine.recordsWhatItIsHanded = true
+    let clock = MovableClock()
+    let watcher = BeatWatcher()
+    let model = try modelShowingTheChecklistPage(
+        rows, cache: cache, engine: engine, clock: clock,
+        sleeper: BeatSleeper(whileAsleep: { await watcher.look() }))
+    watcher.model = model
+
+    model.setChecklistRow(scan.id, ticked: true)
+    model.setChecklistRow(frames.id, ticked: true)
+    #expect(model.cleanCurrentProject())
+    #expect(await waitUntilIdle(model))
+
+    #expect(watcher.cardID == "big.largeFiles")
+    // 1.8 GB ticked, all of it gone. The page's second figure is gone with the question it
+    // answered.
+    #expect(watcher.headline?.before == "1.8 GB →")
+    #expect(watcher.headline?.number == "0")
+    #expect(watcher.headline?.unit == "GB")
+    #expect(watcher.headline?.outOf == nil)
+    // Drawn biggest first — scan.pdf, cards.db, gallery_1fps.rgb — so the untouched row is
+    // the middle one, and it is the only bar still full.
+    #expect(watcher.drainedRows == [true, false, true])
+    #expect(watcher.confirmation == "Moved to the Trash.")
+    // The file nobody ticked is still there, and the ticks are already forgotten with the
+    // scan they were about.
+    #expect(watcher.rowsOnScreen == 1)
+    #expect(model.result?.items.map(\.id) == [database.id])
     #expect(model.tickedChecklistIDs.isEmpty)
 }
 

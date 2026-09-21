@@ -22,8 +22,11 @@ import CleanerCore
 ///
 /// Everything on screen is a bar of bytes. The folder rows are bars, the deck above them is a
 /// skyline of bars, and cleaning **drains** the rows in the order the engine is really working
-/// through them — `ExecutionProgress`, never a timer. That is the one piece of motion; the
-/// rest is quiet native macOS.
+/// through them — `ExecutionProgress`, never a timer. When the run ends they stay drained if
+/// the folders really went, the big number counts down to what is left, and the card holds
+/// that for a moment before the deck deals the next one: see `CardRunResult` and
+/// `AppModel.cardResultSeconds`. That is the whole of the motion; the rest is quiet native
+/// macOS.
 ///
 /// Nothing below this line classifies, totals or phrases anything. Every sentence is
 /// `ProjectDeckText`'s or `ProjectDeckSummary`'s, every size arrives already formatted, every
@@ -146,6 +149,9 @@ struct MainWindowView: View {
                     // Only this card's own run drains its rows. Any other run leaves every
                     // bar full, which is the truth: those folders are still there.
                     progress: ownRun(of: card).progress,
+                    // What the run that has just ended really did, or `nil` while none has.
+                    // It needs no card to match against — see `AppModel.currentCardResult`.
+                    result: model.currentCardResult,
                     problems: model.cardAwaitingAcknowledgement?.problems ?? [],
                     // A box on a checklist page. Straight through to the model, which owns
                     // every rule about them: which rows may be changed, when they are frozen,
@@ -642,7 +648,23 @@ struct ProjectCardView: View {
     /// The run's report while this card is being cleaned. `nil` the rest of the time, which
     /// is what leaves every bar full.
     let progress: ExecutionProgress?
+    /// What the run that has just ended on this card **did**, or `nil` until one has.
+    ///
+    /// The card's "after": which rows are really gone, what is left of the amount, and the
+    /// one sentence saying where it went. Everything about it is already decided — see
+    /// `CardRunResult` — so this file's whole part in it is drawing three things where it
+    /// drew two.
+    ///
+    /// `let` rather than `var`, like `progress` beside it: an optional `var` picks up an
+    /// implicit `nil` in the memberwise initialiser, and a call site that forgot this one
+    /// would compile into a card that never says what its run did.
+    let result: CardRunResult?
     /// The lines a finished clean left behind, empty in the ordinary case.
+    ///
+    /// Still handed in separately from `result`, which also carries them, because these are
+    /// the ones the window is **showing**: the model hands them over only while the card is
+    /// being held, so a note that does not stop the deck never flashes past in orange during
+    /// the beat. See `AppModel.cardAwaitingAcknowledgement`.
     let problems: [String]
     /// Ticks or clears one row of a checklist page, by identifier. A no-op by default,
     /// because every other kind of card has no boxes to press — `ProjectCard.folders` say so
@@ -667,8 +689,23 @@ struct ProjectCardView: View {
     private func shell(rowsScroll: Bool) -> some View {
         DeckCard {
             heading
-            GainNumber(headline: card.totalHeadline)
+            // The offer before a run — "8.5 GB" — and "8.5 GB → 0 GB" once there is one.
+            // Which of the two is the card's decision, not this file's.
+            GainNumber(headline: card.headline(afterRun: result))
                 .padding(.top, 10)
+            // What just happened, in the past tense, directly under the number it is about.
+            // `nil` until a run has ended on this card, and `nil` for a run that removed
+            // nothing at all — there the problem lines below are the report.
+            //
+            // Not orange, deliberately. The line this replaces in the user's report *was*
+            // orange, which is what made a successful deletion read as an error; this is a
+            // plain statement of fact in the card's own weight.
+            if let confirmation = result?.confirmation {
+                Text(confirmation)
+                    .font(.system(size: 13, weight: .semibold))
+                    .wrapped()
+                    .padding(.top, 4)
+            }
             Text(card.folderCountText)
                 .font(.system(size: 13)).foregroundStyle(.secondary)
                 .wrapped()
@@ -807,13 +844,17 @@ struct ProjectCardView: View {
     /// the two part company exactly once: a checklist page draws the rows the user cleared as
     /// well, and those are in no run at all. Drained by position, an unticked row would strike
     /// itself through while the file it names sat untouched on the disk.
+    ///
+    /// Once the run is over the report is replaced by the record, which is what keeps a
+    /// removed row drained instead of refilling its bar over a folder that has gone. Both
+    /// rules live in `ProjectCard.isFolderDrained`.
     private var rows: some View {
         VStack(spacing: 5) {
             ForEach(card.folders) { folder in
                 FolderRowView(
                     folder: folder,
                     isDrained: ProjectCard.isFolderDrained(
-                        at: folder.runIndex, progress: progress),
+                        folder, progress: progress, result: result),
                     setTicked: { setRowTicked(folder.id, $0) })
             }
         }
@@ -1092,15 +1133,38 @@ struct FolderRowView: View {
 /// what there is. Set identically either way, because typographically they are the same thing:
 /// the quiet half of one quantity. Which of the two it is is also the model's answer rather
 /// than an `??` in this body.
+///
+/// After a run there is a **third** piece in front of the other two: `before`, the "8.5 GB →"
+/// the card was holding. It is set at 34 points and dimmed — a size that reads clearly at the
+/// 520-point minimum width and still leaves the loud half of the headline to the number the
+/// user is being told, which is what is left. `minimumScaleFactor` stays as the backstop for
+/// the longest of these, "41.3 GB → 8.5 GB" on a narrow window.
 struct GainNumber: View {
     let headline: SizeHeadline
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // `nil` on every headline that is not a result. Its arrow travels with it — see
+            // `SizeHeadline.before` — so this cannot print a glyph pointing the wrong way.
+            if let before = headline.before {
+                Text(before)
+                    .font(.system(size: 34, weight: .heavy))
+                    .fontWidth(.compressed)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    // The one piece that arrives rather than changes, so it fades in on its
+                    // own instead of being interpolated as digits.
+                    .transition(.opacity)
+            }
             Text(headline.number)
                 .font(.system(size: 96, weight: .heavy))
                 .fontWidth(.compressed)
                 .monospacedDigit()
+                // 8.5 rolling to 0 as the bars empty, which is the whole point of the pair:
+                // the number the user pressed a button about visibly becomes what is left.
+                // `.identity` under Reduce Motion, where a crossfade is what is left of it.
+                .contentTransition(reduceMotion ? .identity : .numericText())
             if let trailing = headline.trailingText {
                 Text(trailing)
                     .font(.system(size: 40, weight: .heavy))
@@ -1118,6 +1182,15 @@ struct GainNumber: View {
         // to fit on one line rather than truncating the thing the card is about — and a
         // checklist page's "0.6 of 41.3 GB" is the longest of these headlines by some way.
         .minimumScaleFactor(0.6)
+        // Keyed on the whole headline rather than on the number, so the arrow arriving and
+        // the digits changing are one movement. The card's own `.id` is its identifier, so
+        // this can only ever animate one card becoming its own result — a different card is
+        // a different view, dealt by `DeckStyle.deal`.
+        //
+        // The same curve as a row emptying, because it is the same event seen twice: the
+        // bars run out and the number they add up to runs down with them.
+        .animation(reduceMotion ? DeckStyle.deal(reduceMotion: true) : DeckStyle.drain,
+                   value: headline)
     }
 }
 

@@ -2,17 +2,24 @@ import Foundation
 
 /// Waiting, behind a protocol so no test in this package sleeps for real time.
 ///
-/// The loop is the only thing in the app that sleeps, and its two waits are a full
-/// background interval — six hours by default — and nothing else. A test that waited for
-/// either would not be a test.
-public protocol ScanLoopSleeping: Sendable {
+/// **Two things in the app wait, and they share this.** The loop below waits out a full
+/// background interval — six hours by default — and `AppModel` waits out
+/// `AppModel.cardResultSeconds`, the beat a cleaned card holds its result for before the deck
+/// deals the next one. A test that waited for either would not be a test: the first is six
+/// hours and the second turns a suite of seventy cleans into a minute of sleeping.
+///
+/// One protocol rather than two of the same shape, and the shape really is the same: a number
+/// of seconds, thrown out of on cancellation. What differs is what each caller does with the
+/// throw, and each says so where it waits — the loop stops for good, and the card's beat is
+/// simply cut short.
+public protocol Sleeping: Sendable {
     /// Throws `CancellationError` when the surrounding task is cancelled, exactly as
     /// `Task.sleep` does. The loop treats a throw as "stop", so a sleeper that swallowed
     /// cancellation would keep the app scanning after it was told to stop.
     func sleep(seconds: TimeInterval) async throws
 }
 
-public struct TaskSleeper: ScanLoopSleeping {
+public struct TaskSleeper: Sleeping {
     public init() {}
 
     public func sleep(seconds: TimeInterval) async throws {
@@ -60,13 +67,14 @@ public protocol ScanRequesting: AnyObject {
 extension BackgroundScanLoop: ScanRequesting {}
 
 /// Spec §9: a full scan runs on app launch, on the background interval, and on manual
-/// rescan. `ScanScheduler` decides; this is the only thing in the app that sleeps.
+/// rescan. `ScanScheduler` decides; this is the only thing in the app that sleeps for long
+/// — the other wait in the app is the card's result beat, which is under a second.
 ///
 /// It lives here rather than in a `.task` modifier because every line of it is a decision —
 /// how long to wait, when to give the scheduler back, whether a follow-up runs — and a test
 /// target cannot import the executable those modifiers live in.
 ///
-/// `Task.sleep` behind `ScanLoopSleeping` rather than a `Timer`: this is already an async
+/// `Task.sleep` behind `Sleeping` rather than a `Timer`: this is already an async
 /// context, and a timer would need a run loop and a class to hold it.
 @MainActor
 public final class BackgroundScanLoop {
@@ -81,7 +89,7 @@ public final class BackgroundScanLoop {
 
     private let model: any ScanRunning
     private let scheduler: ScanScheduler
-    private let sleeper: any ScanLoopSleeping
+    private let sleeper: any Sleeping
     private let clock: @Sendable () -> Date
     /// Guards against two copies of a forever-loop asking the same scheduler for scans.
     private var isLooping = false
@@ -95,7 +103,7 @@ public final class BackgroundScanLoop {
     public init(
         model: any ScanRunning,
         scheduler: ScanScheduler,
-        sleeper: any ScanLoopSleeping = TaskSleeper(),
+        sleeper: any Sleeping = TaskSleeper(),
         clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.model = model
@@ -122,7 +130,7 @@ public final class BackgroundScanLoop {
     /// build a second engine to read one number — and so no number is written in the view.
     public convenience init(
         model: AppModel,
-        sleeper: any ScanLoopSleeping = TaskSleeper(),
+        sleeper: any Sleeping = TaskSleeper(),
         clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.init(

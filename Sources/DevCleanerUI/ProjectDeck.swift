@@ -558,6 +558,63 @@ public enum ProjectDeckText {
     /// takes them.
     public static let nextProject = "Next project"
 
+    // MARK: what the card says once its clean is over
+
+    /// The quiet half of the headline after a run: "8.5 GB →", with what is left set large
+    /// after it.
+    ///
+    /// **The arrow travels with the amount** rather than being typed into the view beside it.
+    /// It is the whole of the sentence — "8.5 GB → 0 GB" says the press worked and a bare
+    /// "8.5 GB 0 GB" says nothing — and a glyph in a SwiftUI body is a glyph no test can
+    /// compare against the number it points at. The same reasoning as `headlineRest(of:)`,
+    /// which is the other preposition in this file.
+    ///
+    /// `ByteText.short`'s own output goes in, so the unit is spelled once and rounded by the
+    /// one table. `SizeHeadline.init(before:after:)` is the only caller.
+    public static func headlineBefore(_ totalText: String) -> String { "\(totalText) →" }
+
+    /// The line under the headline when a run has just ended: what happened, in the card's
+    /// own voice, in the past tense.
+    ///
+    /// **The user asked for this.** They pressed "Delete 8.5 GB for good", it worked, and
+    /// what the card showed them afterwards was the bar full again under a sentence in orange
+    /// — so they could not tell a success from a failure. These three say the thing that
+    /// happened, and the headline beside them says how much of it.
+    ///
+    /// Chosen from the run's **record** — which rows were trashed and which were deleted —
+    /// never from the setting or from what the button offered: `CleanupItem.goesToTheTrash`
+    /// keeps a file of the user's own out of a permanent run, and a card claiming "deleted
+    /// for good" over something sitting in the Trash is the one mistake this whole file is
+    /// careful about. See `CardRunResult.confirmation(of:)`.
+    public static let movedToTheTrash = "Moved to the Trash."
+    public static let deletedForGood = "Deleted for good."
+    /// One card whose rows did not all land in the same place. Reachable: `avdmanager delete
+    /// avd` removes an emulator outright, and the fallback used when the Android command line
+    /// tools are missing moves its files to the Trash instead — so one card's two rows can
+    /// come back with two outcomes. Neither sentence alone would be true of it.
+    public static let movedAndDeleted = "Some moved to the Trash, the rest deleted for good."
+
+    /// Whether a run note is worth stopping the deck for.
+    ///
+    /// A note is not a failure — see `RunRecord.notes` — but the deck has no summary panel,
+    /// so a note the user should read holds the card behind "Next project". That is right for
+    /// Xcode having been open, and for a run whose log could not be written. It was wrong for
+    /// exactly one note, and wrongly enough to be the reason this whole state exists: after a
+    /// successful "Delete 8.5 GB for good" the executor adds
+    /// `Executor.Note.devicesWereRemovedPermanently`, and a card held under that sentence in
+    /// orange reads as a run that failed. It says nothing the card has not already said
+    /// twice — the caution above the button, the button's own "for good", and now
+    /// `deletedForGood` under the headline — so it is left in the run log and the deck moves
+    /// on.
+    ///
+    /// Matched against the **engine's own constant**, never against its prose: the sentence is
+    /// the executor's to reword, and a copy of it spelled out here would start holding cards
+    /// again the day somebody fixed a comma. Every other note holds, including one this build
+    /// has never seen — a note from a newer engine is by definition something new to say.
+    public static func noteHoldsTheCard(_ note: String) -> Bool {
+        note != Executor.Note.devicesWereRemovedPermanently
+    }
+
     // MARK: the card between the two halves of the deck
 
     /// The interstitial's headline.
@@ -923,6 +980,19 @@ public struct SizeHeadline: Equatable, Sendable {
     /// headline: the two figures are one quantity, so they share one unit and it is printed
     /// once, at the end. See `init(tickedBytes:of:)`.
     public let outOf: String?
+    /// "8.5 GB →" — what the card was holding **before** the run that has just ended, and the
+    /// arrow pointing at what is left of it. `nil` on every headline that is not a result.
+    ///
+    /// Set small and dimmed, in front of the big numeral, so the loud half of the card stays
+    /// the half the user is being told about: what is left. The arrow is in here rather than
+    /// in the view for the reason on `ProjectDeckText.headlineBefore`.
+    ///
+    /// The **unit is spelled on both sides** — "8.5 GB → 0 GB" — unlike the checklist page's
+    /// two figures, which share one. These two are not a part and its whole: they are the same
+    /// thing measured twice, before and after, and "8.5 → 0 GB" reads as one quantity that
+    /// shrank rather than as two readings. Both are written in the **before** scale, so a
+    /// card that went from 8.5 GB to nothing says "0 GB" and never "0 KB".
+    public let before: String?
 
     /// Whatever goes after the big numeral, set small: the bare unit, or the whole "of 41.3
     /// GB".
@@ -936,6 +1006,7 @@ public struct SizeHeadline: Equatable, Sendable {
     /// instead of cut in half.
     public init(_ sizeText: String) {
         outOf = nil
+        before = nil
         guard let space = sizeText.firstIndex(of: " ") else {
             number = sizeText
             unit = nil
@@ -944,6 +1015,38 @@ public struct SizeHeadline: Equatable, Sendable {
         number = String(sizeText[..<space])
         let rest = sizeText[sizeText.index(after: space)...]
         unit = rest.isEmpty ? nil : String(rest)
+    }
+
+    /// **The headline after a run: what the card held, an arrow, and what is left of it.**
+    ///
+    /// "8.5 GB → 0 GB" for a card whose every row went, "8.5 GB → 1.2 GB" for one where a row
+    /// was refused. It is the answer to the question the user actually asked of this window —
+    /// *did pressing that button do anything?* — and before it existed the card answered by
+    /// going back to exactly what it had said beforehand.
+    ///
+    /// **`after` is written in `before`'s scale**, through the same
+    /// `ByteText.short(_:inTheScaleOf:)` the checklist page uses, and for a sharper reason
+    /// here: each written in its own scale a card that went from 8.5 GB to nothing would read
+    /// "8.5 GB → 0 KB", and a user who has just deleted a simulator runtime does not need a
+    /// new unit to parse. A 400 MB remainder reads "0.4 GB", which is the part of the 8.5 it
+    /// is.
+    ///
+    /// **Zero is a plain "0"**, never "0.0", for the reason `init(tickedBytes:of:)` gives: it
+    /// is set at 96 points, and a decimal place there is precision about nothing. Its unit
+    /// still comes from `before`'s scale, so the two sides of the arrow agree.
+    ///
+    /// `before` of zero cannot reach here from the deck — a card holding nothing is never
+    /// dealt — and if it ever did, both sides simply read in kilobytes, which is what
+    /// `ByteText` says about nothing.
+    public init(before beforeBytes: Int64, after afterBytes: Int64) {
+        outOf = nil
+        before = ProjectDeckText.headlineBefore(ByteText.short(beforeBytes))
+        // Both sides in one scale, the before's. Split out of `ByteText`'s own output rather
+        // than assembled here, so this cannot come to round differently from the headline the
+        // card was showing a moment ago.
+        let left = SizeHeadline(ByteText.short(afterBytes, inTheScaleOf: beforeBytes))
+        number = afterBytes <= 0 ? "0" : left.number
+        unit = left.unit
     }
 
     /// **The checklist page's headline: what is ticked, out of what there is.**
@@ -973,6 +1076,7 @@ public struct SizeHeadline: Equatable, Sendable {
             : SizeHeadline(ByteText.short(ticked, inTheScaleOf: total)).number
         unit = nil
         outOf = ProjectDeckText.headlineRest(of: ByteText.short(total))
+        before = nil
     }
 }
 
@@ -2017,6 +2121,18 @@ public struct ProjectCard: Identifiable, Equatable, Sendable {
             : SizeHeadline(totalText)
     }
 
+    /// The number the card sets large: what it is **offering** before a run, and what the run
+    /// **left** once there is one.
+    ///
+    /// One property for both states, so the window asks the card for its headline and draws
+    /// what it is handed. A `result?.headline ?? card.totalHeadline` in a SwiftUI body is the
+    /// same choice made where no test can read it — and this is the one number on the card the
+    /// user was mistrusting, because for the whole of the deck's life it went back to the
+    /// offer the moment the offer had been taken up.
+    public func headline(afterRun result: CardRunResult?) -> SizeHeadline {
+        result?.headline ?? totalHeadline
+    }
+
     /// How many rows the run this card starts will report on: the length of **`items`**, the
     /// list handed over, and never of `folders`, the list drawn.
     ///
@@ -2049,6 +2165,32 @@ public struct ProjectCard: Identifiable, Equatable, Sendable {
     public static func isFolderDrained(at index: Int?, progress: ExecutionProgress?) -> Bool {
         guard let index else { return false }
         return index < (progress?.completed ?? 0)
+    }
+
+    /// Whether this row's bar is empty and its name struck through — during the run, and
+    /// **after** it.
+    ///
+    /// Two rules, and the second one is why this exists. While the run is going the report is
+    /// the only thing that knows anything, so the bars drain in the order the folders really
+    /// go. The moment it ends the report is worthless and the record is everything: a row the
+    /// run removed stays drained, and a row it refused goes back to full, which is the truth
+    /// about the disk in both directions.
+    ///
+    /// Before this, draining was the progress rule alone — so every bar on the card refilled
+    /// the instant the run ended, over folders that had gone. That is the whole of what the
+    /// user was reporting: "that orange background is going from right to left… but then it
+    /// comes back, so I'm not sure if it works".
+    ///
+    /// The row rather than its index, because the two rules ask different questions of it: the
+    /// live one wants its place in the list that was handed over, and the record's wants its
+    /// identifier. See `CardRunResult.removed(_:)`.
+    public static func isFolderDrained(
+        _ folder: ProjectCardFolder, progress: ExecutionProgress?, result: CardRunResult?
+    ) -> Bool {
+        guard let result else {
+            return isFolderDrained(at: folder.runIndex, progress: progress)
+        }
+        return result.removed(folder.id)
     }
 }
 
