@@ -139,6 +139,45 @@ import Foundation
     #expect(older.sizeBytes == 12_860_000_000)
 }
 
+/// The reason a runtime whose disk image simctl refuses to delete is held back with, and
+/// the `DeletionMethod` that must **not** have changed alongside it.
+///
+/// The row is now resolved to a disk image UUID at run time, and it was tempting to carry
+/// that UUID on the method instead. A new case there, or a new associated value, changes the
+/// shape a `cache.json` on disk was written in: `DeletionMethod` is what `ScanResult`'s
+/// totals and `ScanEngine` de-duplicate on, so a stored scan that stopped decoding would
+/// quietly start double-counting whatever it did decode. The encoded form is pinned here.
+@Test func theNonDeletableImageReasonRoundTripsAndTheDeletionMethodIsUnchanged() throws {
+    #expect(ProtectionReason.runtimeImageNotDeletable.description
+            == "the system will not delete this one")
+
+    let item = CleanupItem(
+        id: "ios.runtimes|com.apple.CoreSimulator.SimRuntime.iOS-26-5",
+        scannerID: "ios.runtimes", group: .xcodeAndIOS, name: "iOS 26.5",
+        detail: "build 23F77 · the system will not delete this one",
+        sizeBytes: 8_494_282_293, lastUsed: nil, risk: .elevated,
+        protection: .runtimeImageNotDeletable,
+        method: .deleteSimulatorRuntime(
+            identifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-5"))
+    let decoded = try JSONDecoder().decode(
+        CleanupItem.self, from: try JSONEncoder().encode(item))
+    #expect(decoded == item)
+    #expect(decoded.protection == .runtimeImageNotDeletable)
+    #expect(!decoded.isDeletable)
+
+    // A runtime row exactly as an older build wrote it, decoded by this one.
+    let stored = Data("""
+        {"id":"ios.runtimes|com.apple.CoreSimulator.SimRuntime.iOS-18-2",
+         "scannerID":"ios.runtimes","group":"xcodeAndIOS","name":"iOS 18.2",
+         "sizeBytes":7000000000,"risk":"elevated",
+         "method":{"deleteSimulatorRuntime":{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-2"}}}
+        """.utf8)
+    let older = try JSONDecoder().decode(CleanupItem.self, from: stored)
+    #expect(older.method == .deleteSimulatorRuntime(
+        identifier: "com.apple.CoreSimulator.SimRuntime.iOS-18-2"))
+    #expect(older.isDeletable)
+}
+
 @Test func freeSpaceOnRootVolumeIsPositive() throws {
     #expect(try FreeSpace.availableBytes(forVolumeContaining: "/") > 0)
 }

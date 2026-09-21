@@ -221,7 +221,8 @@ public enum ProjectDeckText {
         case .pinnedProject,
              .mostRecentlyUsedDevice, .recentlyUsedDevice, .pinnedDevice, .bootedDevice,
              .sdkInUse, .newestRuntime, .runtimeUsedByKeptDevice,
-             .runtimeUsedByProtectedDevice, .gradleVersionInUse, .newestDeviceSupport:
+             .runtimeUsedByProtectedDevice, .runtimeImageNotDeletable,
+             .gradleVersionInUse, .newestDeviceSupport:
             return "You're using this project — \(reason.description). \(consequence)"
         }
     }

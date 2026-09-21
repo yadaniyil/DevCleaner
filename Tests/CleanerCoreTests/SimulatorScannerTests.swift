@@ -393,6 +393,11 @@ private func protection(keptSimulator: String?,
     let newest = try #require(items.first { $0.name == "iOS 26.5" })
     #expect(newest.protection == .newestRuntime)
     #expect(!newest.isDeletable)
+    // A kept row says why it is kept. It used to carry "removed permanently;
+    // re-downloaded from Apple, several gigabytes" — a promise about a button this row
+    // does not have — which is the same kind of untruth as a card offering to delete a
+    // runtime the tool will refuse.
+    #expect(newest.detail == "build 23F77 · newest installed runtime")
 
     let old = try #require(items.first { $0.name == "iOS 18.2" })
     #expect(old.isDeletable)
@@ -455,6 +460,200 @@ private func protection(keptSimulator: String?,
     let item = try #require(items.first)
     #expect(item.name == "iOS 26.5")
     #expect(item.sizeBytes == 16_000_000_000)
+}
+
+// MARK: runtimes with a disk image
+
+private func image(_ identifier: String, build: String, bytes: Int64,
+                   deletable: Bool = true) -> SimulatorRuntimeImage {
+    SimulatorRuntimeImage(identifier: identifier, build: build, sizeBytes: bytes,
+                          deletable: deletable, state: "Ready")
+}
+
+/// **The card said 17.3 GB and the image on disk is 8.49 GB.**
+///
+/// `bundlePath` is inside the volume the disk image is mounted at, so `du` walks the
+/// unpacked contents of the runtime — a number that has nothing to do with what deleting it
+/// gives back. The image reports its own `sizeBytes`, and that is the row's size.
+///
+/// The measurer is asserted on as well, because nothing in the returned item shows whether
+/// `du` ran, and running it here is not merely wasted: it is a multi-gigabyte walk over a
+/// mounted volume for a number that is then thrown away.
+@Test func aRuntimeWithADiskImageIsSizedFromTheImageAndNotFromTheMountedBundle() async throws {
+    let temp = TempDir()
+    let devices = DeviceInventory(simulators: [], runtimes: [
+        SimulatorRuntime(
+            identifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-5", name: "iOS 26.5",
+            version: "26.5", buildVersion: "23F77",
+            bundlePath: "/Library/Developer/CoreSimulator/Volumes/iOS_23F77/…/iOS 26.5.simruntime",
+            images: [image("09A925DA-7B77-461C-B7E8-98E7F377116D",
+                           build: "23F77", bytes: 8_494_282_293)]),
+    ], avds: [])
+    let measurer = CallCountingSizeMeasurer([
+        "/Library/Developer/CoreSimulator/Volumes/iOS_23F77/…/iOS 26.5.simruntime":
+            17_300_000_000,
+    ])
+
+    let items = await SimulatorRuntimesScanner().scan(context(
+        devices: devices, protection: protection(keptSimulator: nil),
+        temp: temp, sizeMeasurer: measurer))
+
+    let item = try #require(items.first)
+    #expect(item.sizeBytes == 8_494_282_293)
+    // The number the button is printed from. "Delete 17.3 GB for good" is what the user
+    // pressed; "8.5 GB" is what was there.
+    #expect(ByteText.short(item.sizeBytes) == "8.5 GB")
+    #expect(item.isDeletable)
+    #expect(!item.startsUnticked)
+
+    let callCount = await measurer.callCount
+    #expect(callCount == 0)
+}
+
+/// The over-fix guard. A bundle runtime has no image and no other source of a size, so `du`
+/// still runs for it — and only for it.
+@Test func onlyTheRuntimesWithoutADiskImageAreMeasuredWithDu() async throws {
+    let temp = TempDir()
+    let devices = DeviceInventory(simulators: [], runtimes: [
+        SimulatorRuntime(identifier: "iOS-26-5", name: "iOS 26.5", version: "26.5",
+                         buildVersion: "23F77", bundlePath: "/rt/26.5",
+                         images: [image("IMG-1", build: "23F77", bytes: 8_494_282_293)]),
+        SimulatorRuntime(identifier: "iOS-18-2", name: "iOS 18.2", version: "18.2",
+                         buildVersion: "22C150", bundlePath: "/rt/18.2"),
+    ], avds: [])
+    let measurer = CallCountingSizeMeasurer(["/rt/26.5": 16_000_000_000,
+                                             "/rt/18.2": 7_000_000_000])
+
+    let items = await SimulatorRuntimesScanner().scan(context(
+        devices: devices, protection: protection(keptSimulator: nil),
+        temp: temp, sizeMeasurer: measurer))
+
+    #expect(items.count == 2)
+    let withImage = try #require(items.first { $0.name == "iOS 26.5" })
+    #expect(withImage.sizeBytes == 8_494_282_293)
+    let bundleRuntime = try #require(items.first { $0.name == "iOS 18.2" })
+    #expect(bundleRuntime.sizeBytes == 7_000_000_000)
+
+    let batches = await measurer.batches
+    #expect(batches == [["/rt/18.2"]])
+}
+
+/// Two images under one runtime add up rather than one of them being picked.
+///
+/// Reachable when two builds of one version are installed: they share a runtime identifier
+/// — it is derived from the version — so `ScanEngine` merges their rows into one card, and
+/// the executor answers that card by deleting both. A row showing one build's size would
+/// promise half of what the click removes.
+@Test func severalDiskImagesUnderOneRuntimeAreAddedUp() async throws {
+    let temp = TempDir()
+    let devices = DeviceInventory(simulators: [], runtimes: [
+        SimulatorRuntime(identifier: "iOS-26-5", name: "iOS 26.5", version: "26.5",
+                         buildVersion: "23F77", bundlePath: "/rt/26.5",
+                         images: [image("IMG-1", build: "23F77", bytes: 8_494_282_293),
+                                  image("IMG-2", build: "23F77", bytes: 8_006_076_769)]),
+    ], avds: [])
+
+    let items = await SimulatorRuntimesScanner().scan(context(
+        devices: devices, protection: protection(keptSimulator: nil), temp: temp,
+        sizes: ["/rt/26.5": 17_300_000_000]))
+
+    let item = try #require(items.first)
+    #expect(item.sizeBytes == 16_500_359_062)
+}
+
+/// **A runtime whose image simctl will not delete is shown and never offered.**
+///
+/// This is the row that produced the bug report. Offering it is a button that fails after
+/// the click: `simctl runtime delete` refuses, nothing is freed, and the user is told a
+/// permanent deletion went wrong. Kept rather than dropped, because the space is real and a
+/// card that measured 8.49 GB and then said nothing about it is how a user comes to believe
+/// the tool's totals disagree with `du`.
+@Test func aRuntimeWhoseDiskImageCannotBeDeletedIsShownWithItsSizeButNotOffered() async throws {
+    let temp = TempDir()
+    let devices = DeviceInventory(simulators: [], runtimes: [
+        SimulatorRuntime(identifier: "iOS-26-5", name: "iOS 26.5", version: "26.5",
+                         buildVersion: "23F77", bundlePath: "/rt/26.5",
+                         images: [image("IMG-1", build: "23F77", bytes: 8_494_282_293,
+                                        deletable: false)]),
+    ], avds: [])
+
+    let items = await SimulatorRuntimesScanner().scan(context(
+        devices: devices, protection: protection(keptSimulator: nil), temp: temp))
+
+    let item = try #require(items.first)
+    #expect(!item.isDeletable)
+    #expect(item.protection == .runtimeImageNotDeletable)
+    #expect(item.sizeBytes == 8_494_282_293)
+    #expect(item.detail == "build 23F77 · the system will not delete this one")
+    #expect(ReportText.mark(for: item) == "-")
+}
+
+/// One of two images refusing is enough. The row is one card and one click, and that click
+/// would delete the deletable half and report the other half as a failure.
+@Test func oneNonDeletableImageHoldsTheWholeRuntimeBack() async throws {
+    let temp = TempDir()
+    let devices = DeviceInventory(simulators: [], runtimes: [
+        SimulatorRuntime(identifier: "iOS-26-5", name: "iOS 26.5", version: "26.5",
+                         buildVersion: "23F77", bundlePath: "/rt/26.5",
+                         images: [image("IMG-1", build: "23F77", bytes: 8_494_282_293),
+                                  image("IMG-2", build: "23F77", bytes: 8_006_076_769,
+                                        deletable: false)]),
+    ], avds: [])
+
+    let items = await SimulatorRuntimesScanner().scan(context(
+        devices: devices, protection: protection(keptSimulator: nil), temp: temp))
+
+    let item = try #require(items.first)
+    #expect(item.protection == .runtimeImageNotDeletable)
+}
+
+/// The resolver's reasons are not overwritten by this one.
+///
+/// They are the promises the app makes to the user — the newest runtime stays, the runtime a
+/// kept simulator boots on stays — and they are also the ones the interface offers somewhere
+/// to change one's mind about. "The system will not delete this one" instead would be a true
+/// sentence in place of the useful one.
+@Test func theResolversReasonOutranksANonDeletableImage() async throws {
+    let temp = TempDir()
+    let devices = DeviceInventory(simulators: [], runtimes: [
+        SimulatorRuntime(identifier: "iOS-26-5", name: "iOS 26.5", version: "26.5",
+                         buildVersion: "23F77", bundlePath: "/rt/26.5",
+                         images: [image("IMG-1", build: "23F77", bytes: 8_494_282_293,
+                                        deletable: false)]),
+    ], avds: [])
+
+    let items = await SimulatorRuntimesScanner().scan(context(
+        devices: devices,
+        protection: protection(keptSimulator: nil,
+                               runtimes: ["iOS-26-5": .runtimeUsedByKeptDevice]),
+        temp: temp))
+
+    let item = try #require(items.first)
+    #expect(item.protection == .runtimeUsedByKeptDevice)
+    #expect(item.detail == "build 23F77 · used by the simulator you keep")
+}
+
+/// A runtime with an image but no reported bundle path is offered, because the image is
+/// where both its size and its deletion identifier come from.
+///
+/// `runtimeWithoutBundlePathIsSkippedBecauseItCannotBeMeasured` above is the same fixture
+/// without an image, and it is still skipped: the bundle path mattered because it was the
+/// only way to size a runtime, not for its own sake.
+@Test func aRuntimeWithADiskImageAndNoBundlePathIsStillOffered() async throws {
+    let temp = TempDir()
+    let devices = DeviceInventory(simulators: [], runtimes: [
+        SimulatorRuntime(identifier: "iOS-18-2", name: "iOS 18.2", version: "18.2",
+                         buildVersion: "22C150", bundlePath: "",
+                         images: [image("IMG-1", build: "22C150", bytes: 7_000_000_000)]),
+    ], avds: [])
+
+    let items = await SimulatorRuntimesScanner().scan(context(
+        devices: devices, protection: protection(keptSimulator: nil), temp: temp))
+
+    let item = try #require(items.first)
+    #expect(item.sizeBytes == 7_000_000_000)
+    #expect(item.isDeletable)
+    #expect(!item.startsUnticked)
 }
 
 /// `sizes(of:)` batches its input and holds four `du` processes open at most, so

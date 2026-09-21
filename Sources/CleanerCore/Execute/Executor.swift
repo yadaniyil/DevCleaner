@@ -558,6 +558,22 @@ public struct Executor: @unchecked Sendable {
         // enough.
         let booted = Set(devices.simulators.filter(\.isBooted).map(\.udid))
 
+        // The disk image UUIDs `simctl runtime delete` actually takes, keyed by the runtime
+        // identifier a row carries. **Resolved here rather than on the row** because the
+        // inventory is loaded fresh by `CleanerService.clean` while a row may have come out
+        // of a `cache.json` written days ago, and a stale UUID is a deletion that names
+        // something else. A row's identifier is the thing the user chose; the UUID is how
+        // the tool is asked, and that has to be answered now.
+        //
+        // Several identifiers under one key is two builds of one version installed side by
+        // side. They share a runtime identifier — it is derived from the version — so
+        // `ScanEngine` merges them into one row and one card, and answering that card means
+        // both. Nothing about them can be answered separately today, and the alternative is
+        // a row the user has to press twice for a thing named once.
+        let runtimeImages = Dictionary(
+            devices.runtimes.map { ($0.identifier, $0.images.map(\.identifier)) },
+            uniquingKeysWith: { $0 + $1 })
+
         var notes: [String] = []
         if !cancelled, isXcodeRunning() { notes.append(Note.xcodeWasOpen) }
 
@@ -573,7 +589,8 @@ public struct Executor: @unchecked Sendable {
                     sizeBytes: item.sizeBytes, outcome: .skipped,
                     reason: Self.cancelledReason))
             } else {
-                entries.append(perform(item, emulators: emulators, bootedSimulators: booted))
+                entries.append(perform(item, emulators: emulators, bootedSimulators: booted,
+                                       runtimeImages: runtimeImages))
             }
             // Reported for a skipped row too, so the counter the card shows still
             // reaches its total instead of stopping part way with no explanation.
@@ -694,7 +711,8 @@ public struct Executor: @unchecked Sendable {
     }
 
     private func perform(
-        _ item: CleanupItem, emulators: RunningEmulators, bootedSimulators: Set<String>
+        _ item: CleanupItem, emulators: RunningEmulators, bootedSimulators: Set<String>,
+        runtimeImages: [String: [String]]
     ) -> RunEntry {
         func entry(_ outcome: ItemOutcome, target: String,
                    trashedTo: String? = nil, reason: String? = nil) -> RunEntry {
@@ -771,11 +789,43 @@ public struct Executor: @unchecked Sendable {
                 : entry(.failed, target: udid, reason: result?.stderr ?? "simctl delete failed")
 
         case .deleteSimulatorRuntime(let identifier):
-            let result = try? runner.run("/usr/bin/xcrun", ["simctl", "runtime", "delete", identifier])
-            return (result?.succeeded ?? false)
+            // **`simctl runtime delete` does not take the runtime identifier.** On current
+            // Xcode a runtime is a disk image, and the command wants that image's UUID (or
+            // its build number). Handed `com.apple.CoreSimulator.SimRuntime.iOS-26-5` it
+            // answers "No runtime disk images or bundles found matching …" and deletes
+            // nothing — a user pressed "Delete 17.3 GB for good" and got exactly that.
+            //
+            // So the row's identifier is resolved through the inventory this run was handed.
+            // Empty means the inventory knows no image for it, which is a legacy bundle
+            // runtime or an Xcode whose `simctl runtime list` could not be read, and there
+            // the old call is the right one and the only one.
+            let images = runtimeImages[identifier] ?? []
+            guard !images.isEmpty else {
+                let result = try? runner.run(
+                    "/usr/bin/xcrun", ["simctl", "runtime", "delete", identifier])
+                return (result?.succeeded ?? false)
+                    ? entry(.deleted, target: identifier)
+                    : entry(.failed, target: identifier,
+                            reason: result?.stderr ?? "simctl runtime delete failed")
+            }
+            // One command per image, and `.deleted` only if every one of them worked. A
+            // partial success reported as success is a row that leaves gigabytes on the disk
+            // and tells the user they are gone, so the user stops looking.
+            //
+            // `target` stays the runtime identifier whatever the UUIDs were: it is what the
+            // row, the stored run log and `AppModel`'s pruning all key on, and the image is
+            // a detail of how the tool had to be asked. The reason on a failure is simctl's
+            // own stderr, unedited — it is the one text that says what actually went wrong.
+            let failures = images.compactMap { image -> String? in
+                let result = try? runner.run(
+                    "/usr/bin/xcrun", ["simctl", "runtime", "delete", image])
+                if result?.succeeded ?? false { return nil }
+                return result?.stderr ?? "simctl runtime delete failed"
+            }
+            return failures.isEmpty
                 ? entry(.deleted, target: identifier)
                 : entry(.failed, target: identifier,
-                        reason: result?.stderr ?? "simctl runtime delete failed")
+                        reason: failures.joined(separator: "; "))
 
         case .deleteAVD(let name):
             switch emulators {

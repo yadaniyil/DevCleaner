@@ -584,26 +584,190 @@ func aRealRunLandsAProjectsBuildFolderInTheTrashUnderAVisibleName() async throws
     #expect(!runner.recorded.contains { $0.contains("simctl shutdown") })
 }
 
-@Test func deletesASimulatorRuntimeOutright() async throws {
+private let runtimeIdentifier = "com.apple.CoreSimulator.SimRuntime.iOS-18-2"
+
+private func runtimeItem(
+    _ identifier: String = runtimeIdentifier, sizeBytes: Int64 = 7_000_000_000
+) -> CleanupItem {
+    CleanupItem(
+        id: "ios.runtimes|\(identifier)",
+        scannerID: "ios.runtimes", group: .xcodeAndIOS, name: "iOS 18.2", detail: nil,
+        sizeBytes: sizeBytes, lastUsed: nil, risk: .elevated, protection: nil,
+        method: .deleteSimulatorRuntime(identifier: identifier))
+}
+
+/// **The bug this wave exists for.** `simctl runtime delete` does not take the runtime
+/// identifier a row carries: on current Xcode a runtime is a disk image and the command
+/// wants that image's UUID. Handed
+/// `com.apple.CoreSimulator.SimRuntime.iOS-26-5` it answered "No runtime disk images or
+/// bundles found matching …", deleted nothing, and the user was told their permanent
+/// deletion of 17.3 GB had failed.
+///
+/// The UUID is resolved from the inventory the run was handed — loaded fresh by
+/// `CleanerService.clean`, rather than carried on a row that may have come from a
+/// `cache.json` written days ago.
+@Test func deletesARuntimeByTheUUIDOfItsDiskImage() async throws {
     let temp = TempDir()
     let runner = RecordingProcessRunner()
-    let item = CleanupItem(
-        id: "ios.runtimes|com.apple.CoreSimulator.SimRuntime.iOS-18-2",
-        scannerID: "ios.runtimes", group: .xcodeAndIOS, name: "iOS 18.2", detail: nil,
-        sizeBytes: 7_000_000_000, lastUsed: nil, risk: .safe, protection: nil,
-        method: .deleteSimulatorRuntime(identifier: "com.apple.CoreSimulator.SimRuntime.iOS-18-2"))
+    let devices = DeviceInventory(simulators: [], runtimes: [
+        SimulatorRuntime(
+            identifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-5", name: "iOS 26.5",
+            version: "26.5", buildVersion: "23F77", bundlePath: "/rt/26.5",
+            images: [SimulatorRuntimeImage(
+                identifier: "09A925DA-7B77-461C-B7E8-98E7F377116D", build: "23F77",
+                sizeBytes: 8_494_282_293, deletable: true, state: "Ready")]),
+    ], avds: [])
+    let item = runtimeItem("com.apple.CoreSimulator.SimRuntime.iOS-26-5",
+                           sizeBytes: 8_494_282_293)
 
     let record = await makeExecutor(temp: temp, runner: runner)
-        .run(items: [item], devices: .empty, startedAt: startedAt, progress: { _ in })
+        .run(items: [item], devices: devices, startedAt: startedAt, progress: { _ in })
 
     #expect(runner.recorded.contains {
-        $0.contains("simctl runtime delete com.apple.CoreSimulator.SimRuntime.iOS-18-2")
+        $0 == "/usr/bin/xcrun simctl runtime delete 09A925DA-7B77-461C-B7E8-98E7F377116D"
+    })
+    // And never the runtime identifier, which is the call that deleted nothing.
+    #expect(!runner.recorded.contains { $0.contains("SimRuntime.iOS-26-5") })
+
+    let entry = try #require(record.entries.first)
+    #expect(entry.outcome == .deleted)
+    // `target` stays the runtime identifier whatever UUID the tool had to be handed: it is
+    // what the row, the stored run log and `AppModel`'s pruning all key on.
+    #expect(entry.target == "com.apple.CoreSimulator.SimRuntime.iOS-26-5")
+    #expect(entry.trashedTo == nil)
+    #expect(record.permanentlyDeletedBytes == 8_494_282_293)
+    #expect(record.trashedBytes == 0)
+}
+
+/// Two builds of one version share a runtime identifier, so `ScanEngine` merges them into
+/// one row and answering it means both images.
+@Test func deletesEveryDiskImageBehindOneRuntimeRow() async throws {
+    let temp = TempDir()
+    let runner = RecordingProcessRunner()
+    let devices = DeviceInventory(simulators: [], runtimes: [
+        SimulatorRuntime(
+            identifier: runtimeIdentifier, name: "iOS 18.2", version: "18.2",
+            buildVersion: "22C150", bundlePath: "/rt/22C150",
+            images: [SimulatorRuntimeImage(identifier: "IMG-A", build: "22C150",
+                                           sizeBytes: 7_000_000_000, deletable: true,
+                                           state: "Ready")]),
+        SimulatorRuntime(
+            identifier: runtimeIdentifier, name: "iOS 18.2", version: "18.2",
+            buildVersion: "22C151", bundlePath: "/rt/22C151",
+            images: [SimulatorRuntimeImage(identifier: "IMG-B", build: "22C151",
+                                           sizeBytes: 6_000_000_000, deletable: true,
+                                           state: "Ready")]),
+    ], avds: [])
+
+    let record = await makeExecutor(temp: temp, runner: runner)
+        .run(items: [runtimeItem()], devices: devices, startedAt: startedAt,
+             progress: { _ in })
+
+    #expect(runner.recorded.contains { $0.hasSuffix("simctl runtime delete IMG-A") })
+    #expect(runner.recorded.contains { $0.hasSuffix("simctl runtime delete IMG-B") })
+    let entry = try #require(record.entries.first)
+    #expect(entry.outcome == .deleted)
+}
+
+/// One image refusing fails the row, whatever the other one did.
+///
+/// Reported as success, this is a row that leaves gigabytes on the disk and tells the user
+/// they are gone — so they stop looking for them. The reason is simctl's own stderr, which
+/// is the only text that says what actually went wrong.
+@Test func aRuntimeRowFailsWhenAnyOfItsDiskImagesDoes() async throws {
+    let temp = TempDir()
+    let runner = RecordingProcessRunner(responses: [
+        "/usr/bin/xcrun simctl runtime delete IMG-B":
+            ProcessResult(exitCode: 1, stdout: "",
+                          stderr: "Unable to delete: the image is in use\n"),
+    ])
+    let devices = DeviceInventory(simulators: [], runtimes: [
+        SimulatorRuntime(
+            identifier: runtimeIdentifier, name: "iOS 18.2", version: "18.2",
+            buildVersion: "22C150", bundlePath: "/rt/18.2",
+            images: [SimulatorRuntimeImage(identifier: "IMG-A", build: "22C150",
+                                           sizeBytes: 7_000_000_000, deletable: true,
+                                           state: "Ready"),
+                     SimulatorRuntimeImage(identifier: "IMG-B", build: "22C150",
+                                           sizeBytes: 6_000_000_000, deletable: true,
+                                           state: "Ready")]),
+    ], avds: [])
+
+    let record = await makeExecutor(temp: temp, runner: runner)
+        .run(items: [runtimeItem()], devices: devices, startedAt: startedAt,
+             progress: { _ in })
+
+    let entry = try #require(record.entries.first)
+    #expect(entry.outcome == .failed)
+    #expect(entry.reason?.contains("the image is in use") == true)
+    #expect(record.permanentlyDeletedBytes == 0)
+}
+
+/// **The legacy case, and the reason the old call is still here.** A runtime the inventory
+/// knows no disk image for is a bundle runtime — or anything on an Xcode whose
+/// `simctl runtime list` could not be read — and there the runtime identifier is what
+/// `simctl runtime delete` takes and the only thing there is to hand it.
+///
+/// This test pinned the identifier call for every runtime until disk images were read.
+@Test func deletesABundleRuntimeByItsRuntimeIdentifier() async throws {
+    let temp = TempDir()
+    let runner = RecordingProcessRunner()
+
+    // `.empty`: an inventory that knows of no image for this runtime.
+    let record = await makeExecutor(temp: temp, runner: runner)
+        .run(items: [runtimeItem()], devices: .empty, startedAt: startedAt,
+             progress: { _ in })
+
+    #expect(runner.recorded.contains {
+        $0 == "/usr/bin/xcrun simctl runtime delete \(runtimeIdentifier)"
     })
     let entry = try #require(record.entries.first)
     #expect(entry.outcome == .deleted)
     #expect(entry.trashedTo == nil)
     #expect(record.permanentlyDeletedBytes == 7_000_000_000)
     #expect(record.trashedBytes == 0)
+}
+
+/// A runtime in the inventory with no image falls back too — it is the same answer as an
+/// inventory that does not mention the runtime at all, and the branch is the one an older
+/// Xcode takes for every row.
+@Test func aRuntimeTheInventoryKnowsNoImageForStillUsesTheOldCall() async throws {
+    let temp = TempDir()
+    let runner = RecordingProcessRunner()
+    let devices = DeviceInventory(simulators: [], runtimes: [
+        SimulatorRuntime(identifier: runtimeIdentifier, name: "iOS 18.2", version: "18.2",
+                         buildVersion: "22C150", bundlePath: "/rt/18.2"),
+    ], avds: [])
+
+    let record = await makeExecutor(temp: temp, runner: runner)
+        .run(items: [runtimeItem()], devices: devices, startedAt: startedAt,
+             progress: { _ in })
+
+    #expect(runner.recorded.contains {
+        $0 == "/usr/bin/xcrun simctl runtime delete \(runtimeIdentifier)"
+    })
+    let entry = try #require(record.entries.first)
+    #expect(entry.outcome == .deleted)
+}
+
+/// The failure of the legacy call keeps carrying simctl's own message, exactly as it did.
+@Test func aFailedBundleRuntimeDeletionCarriesTheToolsOwnMessage() async throws {
+    let temp = TempDir()
+    let runner = RecordingProcessRunner(responses: [
+        "/usr/bin/xcrun simctl runtime delete \(runtimeIdentifier)":
+            ProcessResult(exitCode: 1, stdout: "",
+                          stderr: "No runtime disk images or bundles found matching "
+                              + "'\(runtimeIdentifier)'\n"),
+    ])
+
+    let record = await makeExecutor(temp: temp, runner: runner)
+        .run(items: [runtimeItem()], devices: .empty, startedAt: startedAt,
+             progress: { _ in })
+
+    let entry = try #require(record.entries.first)
+    #expect(entry.outcome == .failed)
+    #expect(entry.reason?.contains("No runtime disk images or bundles found") == true)
+    #expect(record.permanentlyDeletedBytes == 0)
 }
 
 @Test func aFailedDeviceDeletionCarriesTheToolsOwnMessage() async throws {

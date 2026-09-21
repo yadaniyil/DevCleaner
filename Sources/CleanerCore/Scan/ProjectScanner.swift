@@ -431,7 +431,8 @@ public struct ProjectBuildOutputScanner: CleanupScanner {
         case .pinnedProject,
              .mostRecentlyUsedDevice, .recentlyUsedDevice, .pinnedDevice, .bootedDevice,
              .sdkInUse, .newestRuntime, .runtimeUsedByKeptDevice,
-             .runtimeUsedByProtectedDevice, .gradleVersionInUse, .newestDeviceSupport:
+             .runtimeUsedByProtectedDevice, .runtimeImageNotDeletable,
+             .gradleVersionInUse, .newestDeviceSupport:
             return false
         }
     }
@@ -474,7 +475,8 @@ public struct ProjectBuildOutputScanner: CleanupScanner {
             return "pinned in settings"
         case .mostRecentlyUsedDevice, .recentlyUsedDevice, .pinnedDevice, .bootedDevice,
              .sdkInUse, .newestRuntime, .runtimeUsedByKeptDevice,
-             .runtimeUsedByProtectedDevice, .gradleVersionInUse, .newestDeviceSupport:
+             .runtimeUsedByProtectedDevice, .runtimeImageNotDeletable,
+             .gradleVersionInUse, .newestDeviceSupport:
             // None of these reach `ProtectionSet.projects` today — they belong to
             // devices, SDKs, runtimes and device support folders. Should one arrive, the
             // reason's own words are the only text guaranteed not to lie about it.

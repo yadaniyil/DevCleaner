@@ -86,6 +86,14 @@ public enum ProtectionReason: Codable, Sendable, Equatable, CustomStringConverti
     /// as kept. Deleting it leaves a simulator the app promised to keep, still
     /// installed, that will not boot.
     case runtimeUsedByProtectedDevice
+    /// `simctl runtime list` says the disk image behind this runtime cannot be deleted.
+    ///
+    /// Unlike every other reason here, this one is not the app keeping something back for
+    /// the user's sake: it is the app repeating what the tool told it. A row offered with a
+    /// non-deletable image behind it is a button that fails after the click — which is the
+    /// exact shape of the bug that "Delete 17.3 GB for good" turned out to be — so such a
+    /// runtime is shown with its size and its reason, and never ticked.
+    case runtimeImageNotDeletable
     case gradleVersionInUse(by: String)
     /// The newest device support folder for one device model, which is the one Xcode uses
     /// **now**.
@@ -111,6 +119,10 @@ public enum ProtectionReason: Codable, Sendable, Equatable, CustomStringConverti
         case .newestRuntime:               return "newest installed runtime"
         case .runtimeUsedByKeptDevice:     return "used by the simulator you keep"
         case .runtimeUsedByProtectedDevice: return "used by a simulator that is kept"
+        // What the tool said, not why it said it. simctl gives no cause, and the two this
+        // is seen on — the runtime inside Xcode itself, an image something has mounted —
+        // would need two different sentences and this app cannot tell them apart.
+        case .runtimeImageNotDeletable:    return "the system will not delete this one"
         case .gradleVersionInUse(let by):  return "used by \(by)"
         // Singular and possessive-free, because it is printed both on its own row and
         // after a count — "2 kept · newest for this device · 13.0 GB".

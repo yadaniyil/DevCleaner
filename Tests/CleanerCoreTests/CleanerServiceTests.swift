@@ -1344,6 +1344,78 @@ private func canonical(_ path: String) -> String {
     #expect(stored.finishedAt == finished)
 }
 
+/// **The whole fix, end to end, through the one path the app and the CLI both take.**
+///
+/// The scan sizes the runtime from its disk image and the clean deletes that image by UUID.
+/// Each half is unit-tested on its own; what only this can catch is the wiring between
+/// them, because `clean` builds its **own** `DeviceInventoryLoader` — deliberately, so the
+/// UUID handed to simctl is the one on the disk now rather than one cached with the row —
+/// and a loader that was not given the same runner would resolve nothing and silently fall
+/// back to the call that fails.
+@Test func aRuntimeIsSizedFromItsDiskImageAndDeletedByItsUUID() async throws {
+    let temp = TempDir()
+    let runner = RecordingProcessRunner(responses: [
+        // One simulator, on the newest runtime. Nothing is installed on 18.2, so nothing
+        // protects that runtime and it is the row the clean acts on.
+        "/usr/bin/xcrun simctl list devices --json": ProcessResult(
+            exitCode: 0,
+            stdout: """
+                {"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-5":[
+                 {"udid":"AAA","name":"iPhone 17 Pro","state":"Shutdown","isAvailable":true,
+                  "dataPathSize":1000}]}}
+                """, stderr: ""),
+        "/usr/bin/xcrun simctl list runtimes --json": ProcessResult(
+            exitCode: 0,
+            stdout: """
+                {"runtimes":[
+                 {"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-5","version":"26.5",
+                  "name":"iOS 26.5","buildversion":"23F77","isAvailable":true,
+                  "bundlePath":"/Volumes/iOS_23F77/iOS 26.5.simruntime"},
+                 {"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-2","version":"18.2",
+                  "name":"iOS 18.2","buildversion":"22C150","isAvailable":true,
+                  "bundlePath":"/Volumes/iOS_22C150/iOS 18.2.simruntime"}]}
+                """, stderr: ""),
+        "/usr/bin/xcrun simctl runtime list -j": ProcessResult(
+            exitCode: 0,
+            stdout: """
+                {"09A925DA-7B77-461C-B7E8-98E7F377116D":{"build":"23F77","deletable":true,
+                  "identifier":"09A925DA-7B77-461C-B7E8-98E7F377116D","sizeBytes":8494282293,
+                  "runtimeIdentifier":"com.apple.CoreSimulator.SimRuntime.iOS-26-5",
+                  "state":"Ready"},
+                 "78A894D6-CFB8-4758-8F11-5007D28B92EA":{"build":"22C150","deletable":true,
+                  "identifier":"78A894D6-CFB8-4758-8F11-5007D28B92EA","sizeBytes":7000000000,
+                  "runtimeIdentifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-2",
+                  "state":"Ready"}}
+                """, stderr: ""),
+    ])
+
+    let service = try makeService(
+        temp: temp, runner: runner,
+        // What `du` would answer for the mounted bundle: the number the card used to show,
+        // and 10 GB more than the image it stands for. Nothing may read it.
+        sizes: ["/Volumes/iOS_22C150/iOS 18.2.simruntime": 17_300_000_000])
+    let scan = await service.scan(now: now)
+
+    let row = try #require(scan.items.first { $0.name == "iOS 18.2" })
+    #expect(row.sizeBytes == 7_000_000_000)
+    #expect(row.selectedByDefault)
+    // The newest runtime is still kept, whatever its image says.
+    let newest = try #require(scan.items.first { $0.name == "iOS 26.5" })
+    #expect(newest.protection == .newestRuntime)
+
+    let record = await service.clean(items: [row], now: now, progress: { _ in })
+
+    #expect(runner.recorded.contains {
+        $0 == "/usr/bin/xcrun simctl runtime delete 78A894D6-CFB8-4758-8F11-5007D28B92EA"
+    })
+    // Never the runtime identifier: that is the call that answered "No runtime disk images
+    // or bundles found matching …" and freed nothing.
+    #expect(!runner.recorded.contains { $0.contains("SimRuntime.iOS-18-2") })
+    #expect(record.deletedCount == 1)
+    #expect(record.permanentlyDeletedBytes == 7_000_000_000)
+    #expect(record.failedCount == 0)
+}
+
 @Test func settingsCanSwitchTheWholeRunToPermanentDeletion() async throws {
     let temp = TempDir()
     temp.makeFile("dev/stale/pubspec.yaml", modified: now.addingTimeInterval(-86_400 * 200))

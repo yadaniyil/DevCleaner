@@ -17,10 +17,18 @@ import CleanerCore
     #expect(device.isBooted)
     #expect(device.sizeBytes == 7_090_000_000)
 
+    // With its disk image, which is what `simctl runtime delete` is really handed and what
+    // the row's size comes from. `images` has a default, so the call above this comment —
+    // every existing one — still compiles; this is the other half of the surface.
     let runtime = SimulatorRuntime(
         identifier: "iOS-26-5", name: "iOS 26.5", version: "26.5",
-        buildVersion: "23F77", bundlePath: "/rt/26.5.simruntime")
+        buildVersion: "23F77", bundlePath: "/rt/26.5.simruntime",
+        images: [SimulatorRuntimeImage(
+            identifier: "09A925DA-7B77-461C-B7E8-98E7F377116D", build: "23F77",
+            sizeBytes: 8_494_282_293, deletable: true, state: "Ready")])
     #expect(runtime.identifier == "iOS-26-5")
+    #expect(runtime.imageSizeBytes == 8_494_282_293)
+    #expect(runtime.everyImageIsDeletable)
 
     let avd = AndroidAVD(
         name: "Pixel_8_API_34", directoryPath: "/avd/Pixel_8_API_34.avd",

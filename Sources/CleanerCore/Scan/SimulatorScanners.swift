@@ -103,29 +103,57 @@ public struct SimulatorRuntimesScanner: CleanupScanner {
     public init() {}
 
     public func scan(_ context: ScanContext) async -> [CleanupItem] {
-        // A runtime with no reported bundle path cannot be measured, and an
-        // unmeasurable item would show as 0 bytes and mislead. Skip it.
-        let runtimes = context.devices.runtimes.filter { !$0.bundlePath.isEmpty }
-        let sizes = await context.sizeMeasurer.sizes(of: runtimes.map(\.bundlePath))
+        // A runtime this app can size, one way or the other. A disk image reports its own
+        // size; a bundle runtime has to be measured; one with neither an image nor a
+        // reported bundle path can be neither, and an unmeasurable item would show as
+        // 0 bytes and mislead. Skip that one.
+        let runtimes = context.devices.runtimes.filter {
+            $0.imageSizeBytes != nil || !$0.bundlePath.isEmpty
+        }
+        // `du` only for the runtimes that still need it, and none at all when none do.
+        //
+        // **For a runtime with a disk image the walk is both wasted and wrong.**
+        // `bundlePath` points inside the image's mounted volume, so it measures the
+        // unpacked contents — 17.3 GB for an 8.49 GB image — while what deleting gives
+        // back is the image file. The card said 17.3 GB and the disk had 8.49 GB in it.
+        let toMeasure = runtimes.filter { $0.imageSizeBytes == nil }.map(\.bundlePath)
+        let sizes = toMeasure.isEmpty ? [:] : await context.sizeMeasurer.sizes(of: toMeasure)
 
         return runtimes.map { runtime in
-            let size = ScanHelpers.measured(sizes, runtime.bundlePath)
+            let size = runtime.imageSizeBytes.map { (bytes: $0, unmeasured: false) }
+                ?? ScanHelpers.measured(sizes, runtime.bundlePath)
+            // Every protection the resolver decided comes first and unchanged — the newest
+            // runtime, and the runtime a kept or protected simulator boots on. Only then
+            // the one thing this row can settle for itself: simctl has said it will not
+            // delete this image, so offering it would be a button that fails after the
+            // click, which is the bug this replaced.
+            let protection = context.protection.runtimeIdentifiers[runtime.identifier]
+                ?? (runtime.everyImageIsDeletable ? nil : .runtimeImageNotDeletable)
             let build = runtime.buildVersion.isEmpty ? nil : "build \(runtime.buildVersion)"
+            // A kept row says **why it is kept** and not what deleting it would cost. The
+            // offered sentence — "removed permanently; re-downloaded from Apple" — is a
+            // promise about a button this row does not have, and it read that way on the
+            // newest runtime long before a non-deletable image could reach here. Same rule
+            // the device rows above already follow.
+            let detail = [build, protection?.description ?? Self.offeredDetail]
+                .compactMap { $0 }.joined(separator: " · ")
             return CleanupItem(
                 id: "\(id)|\(runtime.identifier)",
                 scannerID: id, group: group,
                 name: runtime.name,
-                detail: [build, Self.offeredDetail].compactMap { $0 }.joined(separator: " · "),
+                detail: detail,
                 sizeBytes: size.bytes,
                 lastUsed: nil,
                 // `.elevated`, for the same reason as the device rows above: permanent,
                 // and a multi-gigabyte download from Apple to get back.
                 risk: .elevated,
-                protection: context.protection.runtimeIdentifiers[runtime.identifier],
+                protection: protection,
                 method: .deleteSimulatorRuntime(identifier: runtime.identifier),
-                // A runtime whose bundle `du` could not measure is offered unticked. The
-                // only runtime on a real dev machine sits on a separate volume and is 17 GB;
-                // reported as "0 KB" it would have been ticked with nothing to warn on.
+                // A **bundle** runtime whose folder `du` could not measure is offered
+                // unticked. The runtimes on a real dev machine sit on a volume mounted from
+                // a disk image and are gigabytes each; reported as "0 KB" one of them would
+                // have been ticked with nothing to warn on. A runtime with an image never
+                // reaches this, because the image reports its own size.
                 startsUnticked: size.unmeasured)
         }
     }
