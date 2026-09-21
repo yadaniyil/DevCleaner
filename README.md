@@ -3,7 +3,8 @@
 A macOS app that gets disk space back on a developer's Mac, one decision at a time.
 
 <p>
-  <img src="docs/screenshots/card.png" alt="DevCleaner showing one card: the space it would free, the list of what would go, and the Skip and Clean up buttons" width="420">
+  <img src="docs/screenshots/derived-data.png" alt="A DevCleaner card for Xcode derived data: 27.7 GB in 26 items, the list of what would go, and the Skip and Clean up buttons" width="48%">
+  <img src="docs/screenshots/simulators.png" alt="An orange DevCleaner card for iOS simulators, which are deleted for good: the button has to be clicked" width="48%">
 </p>
 
 ## How it works
@@ -12,15 +13,6 @@ A macOS app that gets disk space back on a developer's Mac, one decision at a ti
 - Each card says what would go, how much space it frees, and how it comes back.
 - Two buttons: **Skip** or **Clean up**. Press Return to clean, the right arrow to skip.
 - Keep going until there is nothing left to decide.
-
-## A look around
-
-<p>
-  <img src="docs/screenshots/for-good.png" alt="An orange card for things that are deleted for good, with a button that has to be clicked" width="280">
-  <img src="docs/screenshots/big-things.png" alt="A card separating folders that come back by themselves from the user's own files" width="280">
-</p>
-
-Things that do not come back are orange and have to be clicked. Your own files are kept apart from the folders that rebuild themselves. A menu bar icon shows how much is ready and opens the window.
 
 ## What it cleans
 
