@@ -317,42 +317,25 @@ public final class AppModel {
         // The same rule `rememberDeckOrder` applies to the slots, so the order the cards are
         // dealt in and the order the skyline draws cannot disagree about where a newcomer
         // went. See `Self.deckOrder`.
-        let ordered = Self.deckOrder(
+        return applyingTicks(to: Self.deckOrder(
             deckSession.compactMap { byID[$0.id] },
-            adding: deck.cards.filter { !known.contains($0.id) && !$0.isInterstitial },
-            isBigThing: \.isBigThing)
-
-        // The interstitial is spliced back in rather than remembered, and it has to be:
-        // it holds no slot — see `ProjectDeck.interstitialCardID` — so it cannot come out
-        // of the order above, and appended with the rest of the newly-found cards it would
-        // land *after* the big things it is supposed to introduce.
-        //
-        // Its place is structural rather than historical. It sits immediately before the
-        // first of the user's own files, wherever a later scan has moved that: if every big
-        // thing has been answered it is at the end, which is where it belongs, because
-        // `currentProjectCard` has already passed it by then.
-        guard let interstitial = deck.cards.first(where: \.isInterstitial) else {
-            return applyingTicks(to: ordered)
-        }
-        var cards = ordered
-        cards.insert(interstitial, at: ordered.firstIndex(where: \.isBigThing) ?? ordered.count)
-        return applyingTicks(to: cards)
+            adding: deck.cards.filter { !known.contains($0.id) },
+            isBigThing: \.isBigThing))
     }
 
     /// Where a card the session has not seen belongs in an order that is already fixed.
     ///
     /// **A newcomer that comes back on its own goes in front of the big things; only a big
     /// thing is appended.** Appending everything is what the deck used to do, and it put a
-    /// newly found `.build` card — Return live, blue, "Clean up 20.0 GB" — into the half the
-    /// interstitial has just promised is the user's own and click-only. It happens on an
+    /// newly found `.build` card — Return live, blue, "Clean up 20.0 GB" — among the user's
+    /// own files, where every other card is amber and click-only. It happens on an
     /// ordinary launch: the deck opens on the cached scan, Skip keeps working through the
     /// 51-second launch scan, and whatever that scan has newly found lands in an order a
     /// skip has already fixed.
     ///
-    /// The split is the **first big thing in the order so far**, which is also where
-    /// `sessionCards` splices the interstitial, so a newcomer can never come down on the
-    /// wrong side of it. A deck with no big things puts everything at the end, exactly as
-    /// before.
+    /// The split is the **first big thing in the order so far**, so a newcomer can never come
+    /// down on the wrong side of it. A deck with no big things puts everything at the end,
+    /// exactly as before.
     ///
     /// Generic over the two things that carry this order — the live cards and the session's
     /// slots — because they have to stay in step: the cards are what is dealt and the slots
@@ -466,12 +449,9 @@ public final class AppModel {
     ///
     /// Empty `deckSession` means no card has been answered yet, so there is nothing to hold
     /// still and the live deck is the answer.
-    /// A slot is a card with **bytes in it**, which is why the interstitial has none: the
-    /// skyline draws one bar per slot at a height taken from its total, and "3 of 24"
-    /// counts them. The reasoning is on `ProjectDeck.interstitialCardID`.
     public var deckSlots: [ProjectDeckSlot] {
         guard !deckSession.isEmpty else {
-            return (projectDeck?.cards ?? []).filter { !$0.isInterstitial }.map {
+            return (projectDeck?.cards ?? []).map {
                 ProjectDeckSlot(id: $0.id, totalBytes: $0.totalBytes,
                                 isBigThing: $0.isBigThing)
             }
@@ -539,18 +519,15 @@ public final class AppModel {
     ///
     /// Where it waits is `Self.deckOrder`'s decision, and it is not simply "at the end":
     /// only a big thing goes there. The two halves of the deck are two different promises,
-    /// and a newly found cache dealt behind the card that introduces the user's own files
-    /// would be the one card in that half that comes back on its own — blue, Return live,
-    /// under a promise it contradicts.
+    /// and a newly found cache dealt among the user's own files would be the one card in
+    /// that half that comes back on its own — blue, Return live, between two amber cards.
     private func rememberDeckOrder() {
         guard let deck = projectDeck else { return }
         let known = Set(deckSession.map(\.id))
         deckSession = Self.deckOrder(
             deckSession,
             adding: deck.cards
-                // The interstitial is not a slot — see `ProjectDeck.interstitialCardID` —
-                // and `sessionCards` splices it back into the order instead.
-                .filter { !known.contains($0.id) && !$0.isInterstitial }
+                .filter { !known.contains($0.id) }
                 .map { ProjectDeckSlot(id: $0.id, totalBytes: $0.totalBytes,
                                        isBigThing: $0.isBigThing) },
             isBigThing: \.isBigThing)
@@ -676,30 +653,10 @@ public final class AppModel {
               currentCardHasSettled,
               let card = currentProjectCard
         else { return false }
-        // The interstitial's primary button is "Look through them", which removes nothing:
-        // it notes the card as answered and lets the deck deal the first big thing.
-        //
-        // Dispatched here rather than in the window, and the window is why. Both buttons
-        // read their titles off the card — `primaryActionTitle` and `secondaryActionTitle` —
-        // so a view that decided for itself which model call each one made could label a
-        // button "Look through them" and wire it to a clean. It arrives through this method
-        // rather than one of its own so the interstitial gets the settle window for free:
-        // the primary button sits exactly where Clean up sat on the card before it, and a
-        // held Return must not carry through.
-        guard !card.isInterstitial else {
-            rememberDeckOrder()
-            projectDecisions[card.id] = .skipped
-            deckAdvanced()
-            // Asked here as well, for the same reason every other answering path asks: a
-            // background scan can have pruned the last of the user's own files away while
-            // this card was on screen, and then "Look through them" is what ends the deck.
-            requestRescanIfTheDeckIsFinished()
-            return true
-        }
-        // Nothing to hand over. The interstitial is answered above; what reaches here with an
-        // empty list is a checklist page with every box still clear, which is the state it is
-        // dealt in — so this guard is the model's own refusal, standing whether or not the
-        // window remembered to disable the button.
+        // Nothing to hand over. What reaches here with an empty list is a checklist page with
+        // every box still clear, which is the state it is dealt in — so this guard is the
+        // model's own refusal, standing whether or not the window remembered to disable the
+        // button.
         guard !card.items.isEmpty else { return false }
         // Before the decision, so the first clean of a session fixes the deck's order
         // while the card being cleaned is still in it.
@@ -770,20 +727,6 @@ public final class AppModel {
         else { return }
         rememberDeckOrder()
         projectDecisions[card.id] = .skipped
-        // "Skip them all": the interstitial's secondary answers for the whole second half
-        // of the deck at once, because a user who has just cleaned twelve caches and does
-        // not want to be asked about their downloads should be able to say so once. The
-        // alternative is arrow-keying through fourteen cards, which is how a user learns to
-        // arrow-key without reading — and these are the cards that must be read.
-        //
-        // Recorded per card rather than as one flag, so every one of them keeps its slot,
-        // its bar in the skyline and its share of "14 skipped · 49.2 GB", and so
-        // `reviewSkippedProjects` can bring them all back if the user changes their mind.
-        if card.isInterstitial {
-            for bigThing in sessionCards where bigThing.isBigThing {
-                projectDecisions[bigThing.id] = .skipped
-            }
-        }
         deckAdvanced()
         requestRescanIfTheDeckIsFinished()
     }
@@ -815,11 +758,21 @@ public final class AppModel {
         requestRescanIfTheDeckIsFinished()
     }
 
-    /// Forgets every skip, so those cards come back.
+    /// Starts the deck again on what is left: every card the scan still has, from the first.
     ///
-    /// Only the skips. A `.cleaned` decision is not a decision the user can change their
-    /// mind about — the folders are gone — and it is what the session total and the skyline
-    /// are built from.
+    /// **A fresh pass, not the old one with its skips forgotten.** It used to keep the
+    /// session's order and slots and drop only the `.skipped` decisions, so the deck came
+    /// back at the first skipped card that still *had* a card, under a skyline holding every
+    /// bar the session had ever drawn. The app lives in the menu bar for days, and on a real
+    /// machine that was eight days of session: bars cleaned last week, caches later scans had
+    /// slotted in front of the big things, and skipped folders that had since gone
+    /// — back as grey "upcoming" bars the deck could never deal. The user pressed the button
+    /// and landed in the middle of the strip, with bars on their left the deck would never
+    /// visit. Now the strip is exactly the cards about to be asked, and "1 of 19" is the first.
+    ///
+    /// So the session's totals start again too. The end card the user has just read said
+    /// what the first pass did, and the folders it cleaned are pruned out of the scan: there
+    /// is no card of theirs left to go back through.
     ///
     /// The one rescan this session gets is **not** re-armed. The deck the user is going
     /// back through was measured a moment ago, and a second 51-second scan is the last
@@ -828,14 +781,18 @@ public final class AppModel {
     /// Refused while a clean is running — including the beat a finished card holds its result
     /// for — and while a card is being held for its problems, the same two conditions Skip
     /// and Clean up refuse under. The button is only ever on the end card, so neither state
-    /// can be reached by clicking; the guard is here because forgetting every skip while a
-    /// run is in flight would deal a card out from under it, and a model that answers the
+    /// can be reached by clicking; the guard is here because starting over while a run is
+    /// in flight would deal a card out from under it, and a model that answers the
     /// question is a model a test can ask. A background **scan** does not refuse it, for the
     /// reason `skipCurrentProject` gives: it runs unasked for about 51 seconds and the deck
     /// is still the user's.
     public func reviewSkippedProjects() {
         guard !isCleaningProject, cardAwaitingAcknowledgement == nil else { return }
-        projectDecisions = projectDecisions.filter { $0.value != .skipped }
+        projectDecisions = [:]
+        // Empty, so the order is taken from the scan on screen again until the next answer
+        // fixes it — see `rememberDeckOrder`.
+        deckSession = []
+        trashedHiddenFolders = false
         // A card arrives under the cursor the moment this returns, and the button that was
         // just pressed sits where Clean up will be — so the same settle window applies.
         deckAdvanced()

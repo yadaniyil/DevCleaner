@@ -238,7 +238,7 @@ func modelRow(
 /// Every property here is part of the contract that page is built against, and each one is
 /// load-bearing:
 ///
-/// - `.bigThings` and `.irreplaceable` are what put the card behind the interstitial, take
+/// - `.bigThings` and `.irreplaceable` are what deal the card after the caches, take
 ///   its Return key away, paint it amber and make its wording name the Trash whatever the
 ///   Trash setting says. The deck reads **either** of them — see `ProjectCard.init(scanner:…)`
 ///   — so a fixture giving only one would hide the other reading.

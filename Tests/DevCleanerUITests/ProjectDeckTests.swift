@@ -2089,7 +2089,7 @@ private func twoFolderCard() throws -> ProjectCard {
     #expect(built.smallThingsText == "2 small things under 50 MB were not shown · 7 MB")
 }
 
-// MARK: - the user's own files come last, behind a card that says so
+// MARK: - the user's own files come last
 
 /// **The two halves are never mixed by size.** A 19 GB language model does not get dealt
 /// before a 9 GB cache: everything that comes back on its own is asked about first, biggest
@@ -2109,70 +2109,12 @@ private func twoFolderCard() throws -> ProjectCard {
         // Regenerable, biggest first. The grouped card is titled by its scanner ("Derived
         // data"); a per-item card is titled by its row.
         "Derived data", "game",
-        // Then the card that says the promise is changing.
-        ProjectDeckText.interstitialHeadline,
-        // Then the user's own files, biggest first among themselves.
+        // Then the user's own files, straight after and biggest first among themselves. No
+        // card stands between the halves: the first big thing says the promise changed on
+        // its own, amber and with no Return key.
         "lmstudio-community/Qwen3-30B-GGUF", "Xcode_26.1_beta.xip",
     ])
-    #expect(built.cards.map(\.isBigThing) == [false, false, false, true, true])
-    #expect(built.cards.filter { $0.isInterstitial }.count == 1)
-}
-
-/// No big things, no interstitial. A card introducing an empty second half would be a card
-/// the user has to press to be told there is nothing there.
-@Test func thereIsNoInterstitialWhenNothingBigIsOffered() {
-    let built = deck([
-        folderRow(project: "game", folder: "build", sizeBytes: 3_300_000_000),
-        xdgCacheRow(name: "uv", sizeBytes: 1_100_000_000),
-    ])
-
-    #expect(built.cards.contains { $0.isInterstitial } == false)
-    #expect(built.cards.map(\.name) == ["game", "uv"])
-}
-
-/// The interstitial's number and its count come from the cards behind it, so they cannot
-/// disagree with what the deck is about to deal — and the sentence deliberately does not
-/// repeat the amount, which is set at 96 points two lines above it.
-@Test func theInterstitialCountsAndTotalsTheCardsBehindIt() throws {
-    let built = deck([
-        modelRow(publisher: "lmstudio-community", model: "Qwen3-30B-GGUF",
-                 sizeBytes: 19_000_000_000),
-        downloadRow(name: "Xcode_26.1_beta.xip", sizeBytes: 7_000_000_000),
-        downloadRow(name: "recordings.zip", sizeBytes: 3_000_000_000,
-                    detail: DownloadsScanner.archiveDetail),
-    ])
-
-    let card = try #require(built.cards.first { $0.isInterstitial })
-    #expect(card.id == ProjectDeck.interstitialCardID)
-    #expect(card.name == "That's everything that comes back.")
-    #expect(card.eyebrow == "Big things")
-    #expect(card.totalBytes == 29_000_000_000)
-    #expect(card.totalText == "29.0 GB")
-    #expect(card.folderCountText
-            == "Next: 3 big things that are yours. They do not come back; "
-            + "they go to the Trash only if you say so.")
-    #expect(card.promiseText == "Looking through them decides nothing.")
-    // It offers nothing to the engine, which is the other half of why `AppModel` answers it
-    // without calling one.
-    #expect(card.items.isEmpty)
-    #expect(card.folders.isEmpty)
-    #expect(card.pathText == nil)
-    #expect(card.revealURL == nil)
-    // Both buttons come off the card: "Look through them" and "Skip them all". Looking
-    // costs nothing, so Return still answers it.
-    #expect(card.primaryActionTitle == "Look through them")
-    #expect(card.secondaryActionTitle == "Skip them all")
-    #expect(card.primaryActionKeyHint == ProjectDeckText.cleanUpKeyHint)
-    #expect(card.answersToReturn)
-}
-
-/// Singular, so the sentence never reads "1 big things".
-@Test func theInterstitialCountsOneBigThingInTheSingular() throws {
-    let built = deck([downloadRow(name: "Docker.dmg", sizeBytes: 4_000_000_000)])
-    let card = try #require(built.cards.first { $0.isInterstitial })
-    #expect(card.folderCountText
-            == "Next: 1 big thing that is yours. It does not come back; "
-            + "it goes to the Trash only if you say so.")
+    #expect(built.cards.map(\.isBigThing) == [false, false, true, true])
 }
 
 /// **The card that has to be clicked.** Everything about it says the promise is different:
@@ -2332,43 +2274,6 @@ private func bigSlots(_ triples: [(String, Int64, Bool)]) -> [ProjectDeckSlot] {
     #expect(none.endDetailLines == ["4.4 GB moved to the Trash", "from 1 card"])
 }
 
-/// **Answering the interstitial is not a skipped card.** It holds no slot, because it holds
-/// no bytes, and the skip count is taken over the slots for exactly this reason: read off
-/// the decisions, "Skip them all" would report one more skipped card than the deck ever had
-/// with nothing in `skippedBytes` to account for it.
-@Test func answeringTheInterstitialIsNeverCountedAsASkippedCard() {
-    let summary = ProjectDeckSummary(
-        slots: bigSlots([("model", 18_000_000_000, true)]),
-        decisions: [
-            ProjectDeck.interstitialCardID: .skipped,
-            "model": .skipped,
-        ],
-        currentCardID: nil, moveToTrash: true)
-
-    #expect(summary.skippedCount == 1)
-    #expect(summary.skippedText == "1 skipped · 18.0 GB")
-    #expect(summary.skippedBytes == 18_000_000_000)
-    #expect(summary.skyline.map(\.id) == ["model"])
-    // And the headline is still the one for a session where something happened, rather than
-    // "Nothing to clean up." — the user did decide, twice.
-    #expect(summary.endHeadline == ProjectDeckText.endHeadline)
-    #expect(summary.endDetailLines == [ProjectDeckText.endDetailNothingCleaned])
-}
-
-/// No bar is `current` while the interstitial is on screen, and there is no position to
-/// print. The card's own headline is what says where the user is — see
-/// `ProjectDeck.interstitialCardID`.
-@Test func theInterstitialHasNoPositionAndNoCurrentBar() {
-    let summary = ProjectDeckSummary(
-        slots: bigSlots([("cache", 9_000_000_000, false), ("model", 18_000_000_000, true)]),
-        decisions: ["cache": .cleaned(trashedBytes: 9_000_000_000, deletedBytes: 0,
-                                      problems: [])],
-        currentCardID: ProjectDeck.interstitialCardID, moveToTrash: true)
-
-    #expect(summary.positionText == nil)
-    #expect(summary.skyline.map(\.state) == [.cleaned, .upcoming])
-}
-
 /// A big-things scanner **this build has never heard of** still gets a card that cannot be
 /// answered by Return.
 ///
@@ -2390,11 +2295,9 @@ private func bigSlots(_ triples: [(String, Int64, Bool)]) -> [ProjectDeckSlot] {
     let built = deck([unknown, xdgCacheRow(name: "uv", sizeBytes: 1_100_000_000)],
                      moveToTrash: false)
 
-    // Sorted after the 1.1 GB cache despite being forty times its size, and behind the
-    // card that says the promise has changed.
+    // Sorted after the 1.1 GB cache despite being forty times its size.
     #expect(built.cards.map(\.id)
-            == ["other.xdgCache|/Users/test/.cache/uv", ProjectDeck.interstitialCardID,
-                "big.photoLibraries"])
+            == ["other.xdgCache|/Users/test/.cache/uv", "big.photoLibraries"])
     let card = try #require(built.cards.last)
     #expect(card.isBigThing)
     #expect(card.kind == .bigThing(scannerID: "big.photoLibraries"))
@@ -2435,18 +2338,16 @@ private func bigSlots(_ triples: [(String, Int64, Bool)]) -> [ProjectDeckSlot] {
 
 /// Both counts are taken over the **slots**, not over the decisions.
 ///
-/// The skip count is where it is load-bearing — answering the interstitial records a
-/// `.skipped` decision, and it holds no slot — but the cleaned count is restricted the same
-/// way for symmetry: counted off the decisions, the next card without a slot would be free
-/// to appear in "from 4 cards" with no bytes anywhere accounting for it.
+/// Counted off the decisions, a card without a slot would be free to appear in "from 4 cards"
+/// or "1 skipped" with no bytes anywhere accounting for it.
 @Test func bothEndCardCountsAreTakenOverTheSlotsRatherThanTheDecisions() {
     let summary = ProjectDeckSummary(
         slots: slots([("cache", 4_400_000_000)]),
         decisions: [
             "cache": .cleaned(trashedBytes: 4_400_000_000, deletedBytes: 0, problems: []),
-            // Two decisions with no slot at all: the interstitial, and a card a later scan
-            // dropped before it was ever dealt.
-            ProjectDeck.interstitialCardID: .skipped,
+            // Two decisions with no slot at all: cards a later scan dropped before they were
+            // ever dealt.
+            "gone": .skipped,
             "vanished": .cleaned(trashedBytes: 9_000_000_000, deletedBytes: 0, problems: []),
         ],
         currentCardID: nil, moveToTrash: true)
@@ -2742,10 +2643,6 @@ private func bigSlots(_ triples: [(String, Int64, Bool)]) -> [ProjectDeckSlot] {
     #expect(tones["nimbus"] == .deliberate)
     #expect(tones["iOS simulators"] == .deliberate)
     #expect(tones["Xcode_26.1_beta.xip"] == .deliberate)
-    // **The interstitial stays blue.** Its "Look through them" removes nothing and answers
-    // Return, which is what the tone follows — the plan's own rule, that the colour is
-    // amber exactly where the key is gone.
-    #expect(tones[ProjectDeckText.interstitialHeadline] == .regenerable)
 
     // Said once more as the rule rather than as six examples, over every card in the deck.
     for card in built.cards {
@@ -2758,8 +2655,8 @@ private func bigSlots(_ triples: [(String, Int64, Bool)]) -> [ProjectDeckSlot] {
 
 /// A Hugging Face model is dealt exactly as an LM Studio one is, and named after the model.
 ///
-/// This is the card that should have existed instead of `huggingface`. It is behind the
-/// interstitial, it has no Return key, its promise says the Trash whatever the settings say,
+/// This is the card that should have existed instead of `huggingface`. It is dealt after the
+/// caches, it has no Return key, its promise says the Trash whatever the settings say,
 /// and — the whole point — its heading is a name the user can recognise as the thing their
 /// dictation app needs.
 @Test func aHuggingFaceModelIsDealtAsOneOfTheUsersOwnThingsUnderItsOwnName() throws {
@@ -2795,10 +2692,8 @@ private func bigSlots(_ triples: [(String, Int64, Bool)]) -> [ProjectDeckSlot] {
             == "Every model Ollama downloaded. ollama pull gets them back.")
     #expect(ollama.answersToReturn == false)
 
-    // Both behind the card that says the promise has changed, and neither in the amount the
-    // status panel shows.
-    #expect(built.cards.map(\.isBigThing) == [false, true, true])
-    #expect(built.cards.first?.isInterstitial == true)
+    // Both dealt as the user's own, and neither in the amount the status panel shows.
+    #expect(built.cards.map(\.isBigThing) == [true, true])
     #expect(built.defaultOfferBytes == 0)
 }
 
@@ -2833,7 +2728,7 @@ private func largeFiles() -> [CleanupItem] {
 /// Every file that ever goes from here is one the user ticked.
 ///
 /// And it is a big thing besides, so everything true of the user's own files is true here:
-/// behind the interstitial, no Return key, an amber button, and wording that names the Trash
+/// dealt after the caches, no Return key, an amber button, and wording that names the Trash
 /// whatever the Trash setting says. What the page adds on top is the boxes — and every number
 /// on the card following them.
 @Test func theLargeFilesPageIsDealtWithNothingTicked() throws {
@@ -3133,8 +3028,8 @@ private func largeFiles() -> [CleanupItem] {
     #expect(built.cards.contains { !$0.items.isEmpty })
 }
 
-/// The page is one big-thing slot and counts like any other: behind the interstitial, inside
-/// its total, and outside the amount the menu bar advertises.
+/// The page is one big-thing slot and counts like any other: after the caches, and outside
+/// the amount the menu bar advertises.
 @Test func thePageTakesOneBigThingsPlaceInTheDeck() throws {
     let built = deck(largeFiles() + [
         toolRow(scanner: "xcode.derivedData", name: "Runner",
@@ -3143,17 +3038,12 @@ private func largeFiles() -> [CleanupItem] {
         downloadRow(name: "Xcode_26.1_beta.xip", sizeBytes: 7_000_000_000),
     ])
 
+    // One card for all four files, after the 7 GB download it is smaller than.
     #expect(built.cards.map(\.id) == [
-        "xcode.derivedData", ProjectDeck.interstitialCardID,
+        "xcode.derivedData",
         "big.downloads|/Users/test/Downloads/Xcode_26.1_beta.xip", "big.largeFiles",
     ])
-    // One card for all four files, so the interstitial counts it once — and totals what it
-    // holds, which is the sum of the rows on the page.
-    let interstitial = try #require(built.cards.first { $0.isInterstitial })
-    #expect(interstitial.totalBytes == 10_324_000_000)
-    #expect(interstitial.folderCountText
-            == "Next: 2 big things that are yours. They do not come back; "
-            + "they go to the Trash only if you say so.")
+    #expect(built.cards.last?.totalBytes == 3_324_000_000)
     // Never in the number the menu bar shows: every row is `startsUnticked`, and the amount
     // is about the half of the deck that comes back on its own.
     #expect(built.defaultOfferBytes == 9_100_000_000)
@@ -3163,30 +3053,21 @@ private func largeFiles() -> [CleanupItem] {
 
 /// **Finding 3.** The glyph and the shortcut are decided together, on the card.
 ///
-/// They were a literal `"→"` and a hard-coded `.keyboardShortcut(.rightArrow)` in the window,
-/// so both survived unchanged onto the one card where that button means something else: the
-/// interstitial's secondary is "Skip them all", and an arrow held down through the first half
-/// of the deck pressed it on the next repeat — every one of the user's own files skipped
-/// unread, which is the one set of cards that exists to be read.
-@Test func onlyTheButtonThatSkipsOneThingAnswersToTheArrow() throws {
+/// Every secondary skips one card, the user's own files included: skipping removes nothing,
+/// so the arrow that flicks through the caches goes on flicking through them. What those
+/// cards take away is Return, which is the key that cleans.
+@Test func everySkipAnswersToTheArrowAndOnlyTheCachesToReturn() throws {
     let built = deck([
         xdgCacheRow(name: "uv", sizeBytes: 1_100_000_000),
         downloadRow(name: "Xcode_26.1_beta.xip", sizeBytes: 7_000_000_000),
     ])
 
-    let ordinary = try #require(built.cards.first { !$0.isInterstitial })
-    #expect(ordinary.secondaryActionTitle == "Skip")
-    #expect(ordinary.secondaryActionKeyHint == "→")
-    #expect(ordinary.secondaryAnswersToArrow)
-
-    let interstitial = try #require(built.cards.first { $0.isInterstitial })
-    #expect(interstitial.secondaryActionTitle == "Skip them all")
-    #expect(interstitial.secondaryActionKeyHint == nil)
-    #expect(interstitial.secondaryAnswersToArrow == false)
-    // Return still answers "Look through them", so the card is not a dead end for somebody
-    // working from the keyboard. What it no longer has is a key that can be held through it.
-    #expect(interstitial.answersToReturn)
-    #expect(interstitial.primaryActionKeyHint == "⏎")
+    for card in built.cards {
+        #expect(card.secondaryActionTitle == "Skip", "\(card.name)")
+        #expect(card.secondaryActionKeyHint == "→", "\(card.name)")
+        #expect(card.secondaryAnswersToArrow, "\(card.name)")
+    }
+    #expect(built.cards.map(\.answersToReturn) == [true, false])
 }
 
 /// **Finding 5.** Big-thing-ness is read off `risk == .irreplaceable` as well as off the
@@ -3214,9 +3095,8 @@ private func largeFiles() -> [CleanupItem] {
     #expect(card.primaryActionTone == .deliberate)
     #expect(card.primaryActionTitle == "Move 2.0 GB to Trash")
     #expect(card.promiseText == ProjectDeckText.bigThingPromise)
-    // Behind the card that says the promise has changed, although its group says otherwise.
-    #expect(built.cards.map(\.isBigThing) == [false, false, true])
-    #expect(built.cards.first { $0.isInterstitial } != nil)
+    // Dealt after the caches, although its group says otherwise.
+    #expect(built.cards.map(\.isBigThing) == [false, true])
     // And out of the amount the menu bar advertises, which counts the regenerable half only.
     #expect(built.defaultOfferBytes == 3_300_000_000)
 }
@@ -3230,7 +3110,7 @@ private func largeFiles() -> [CleanupItem] {
         lastUsed: nil, risk: .irreplaceable, protection: nil,
         method: .removePath("/Users/test/.cache/uv"))
 
-    let card = try #require(deck([cache]).cards.first { !$0.isInterstitial })
+    let card = try #require(deck([cache]).cards.first)
     #expect(card.isBigThing)
     #expect(card.kind == .bigThing(scannerID: "other.xdgCache"))
     #expect(card.answersToReturn == false)
@@ -3263,9 +3143,8 @@ private func largeFiles() -> [CleanupItem] {
 /// Everything else goes through, and both exceptions are deliberate.
 ///
 /// The **right arrow** is held down through the deck on purpose: skipping removes nothing, and
-/// flicking through twenty-four cards is the deck working as intended. What made the arrow
-/// dangerous was the interstitial's secondary meaning "skip them all", and that is fixed on
-/// the card — `ProjectCard.secondaryAnswersToArrow`.
+/// flicking through twenty-four cards is the deck working as intended. Whether a card lets
+/// the arrow press its secondary is the card's decision — `ProjectCard.secondaryAnswersToArrow`.
 ///
 /// **Another window** is nobody's business: the settings window holds text fields, and a
 /// field is entitled to every repeat it gets.

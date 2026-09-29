@@ -173,7 +173,7 @@ public struct XDGCacheScanner: CleanupScanner {
     /// and a model store keeps that promise only in the sense that a gigabyte comes back
     /// over somebody's network while the app that needs it is broken. That is the
     /// distinction `GroupID.bigThings` exists for, so the models moved there — one row per
-    /// model, click-only, always to the Trash, behind the interstitial (see
+    /// model, click-only, always to the Trash, after every cache in the deck (see
     /// `AIModelScanner`) — and `~/.cache/huggingface` as a **whole** is now offered by
     /// nothing at all.
     ///

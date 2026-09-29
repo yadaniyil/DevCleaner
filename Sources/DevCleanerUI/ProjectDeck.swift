@@ -615,54 +615,7 @@ public enum ProjectDeckText {
         note != Executor.Note.devicesWereRemovedPermanently
     }
 
-    // MARK: the card between the two halves of the deck
-
-    /// The interstitial's headline.
-    ///
-    /// It is the deck telling the user that the promise is about to change. Everything
-    /// before this card comes back on its own; nothing after it does. Without the card the
-    /// change happens silently between one Return press and the next, and the first
-    /// difference the user would meet is a button that no longer answers to the key they
-    /// have been using.
-    ///
-    /// Short enough for the card's two-line title at 26 points. The plan drafted "That's
-    /// everything that comes back on its own." and the clause is dropped for width — the
-    /// detail line underneath says what the deck is moving on to, in full.
-    public static let interstitialHeadline = "That's everything that comes back."
-
-    /// The line under the interstitial's big number.
-    ///
-    /// It deliberately does **not** repeat the amount: that is set at 96 points two lines
-    /// above, and a sentence restating it teaches the user that the two numbers on a card
-    /// can be different things. What the sentence adds is the count, whose files they are,
-    /// and the one rule that follows — nothing happens unless they say so.
-    public static func interstitialDetail(count: Int) -> String {
-        let subject = "Next: " + counted(count, "big thing") + " that "
-            + (count == 1 ? "is" : "are") + " yours. "
-        return count == 1
-            ? subject + "It does not come back; it goes to the Trash only if you say so."
-            : subject + "They do not come back; they go to the Trash only if you say so."
-    }
-
-    /// "Look through them" — the interstitial's primary button.
-    ///
-    /// It answers to Return, unlike the cards it introduces. Looking costs nothing, and
-    /// taking the key away here would make the interstitial itself the thing a keyboard
-    /// user cannot get past — while the cards behind it still have to be clicked, which is
-    /// where the deliberate friction belongs.
-    public static let interstitialPrimary = "Look through them"
-
-    /// "Skip them all" — the way past the whole second half in one press.
-    ///
-    /// Offered rather than made difficult. A user who has just cleaned twelve caches and
-    /// does not want to be asked about their downloads should be able to say so once, and
-    /// the alternative is arrow-keying through fourteen cards, which teaches them to
-    /// arrow-key without reading.
-    public static let interstitialSecondary = "Skip them all"
-
-    /// The line above the interstitial's buttons. Neither button removes anything, and that
-    /// is the only thing the user needs to know before pressing either.
-    public static let interstitialPromise = "Looking through them decides nothing."
+    // MARK: the user's own files
 
     /// "including 3 big things · 21.0 GB" — the end card's line for the user's own files.
     ///
@@ -1242,10 +1195,7 @@ public struct ProjectCardFolder: Identifiable, Equatable, Sendable {
         case .project:
             name = item.name
             hint = ProjectDeckText.restoreHint(forFolderNamed: item.name)
-        // `.interstitial` never reaches here — that card has no rows at all — and shares
-        // this branch rather than being given one of its own, because a branch nothing can
-        // run is a branch no test can check.
-        case .tool, .bigThing, .interstitial:
+        case .tool, .bigThing:
             name = ProjectDeckText.rowName(of: item)
             hint = item.detail ?? ""
         }
@@ -1329,15 +1279,6 @@ public struct ProjectCard: Identifiable, Equatable, Sendable {
         /// promise above the buttons — and a `Bool` that has to be read together with
         /// `.tool` to mean anything is a `Bool` somebody will read on its own.
         case bigThing(scannerID: String)
-        /// The card between the two halves of the deck: see
-        /// `ProjectDeck.interstitialCardID`.
-        ///
-        /// It holds no rows and cleans nothing. It is a `ProjectCard` all the same, because
-        /// the alternative is a second kind of thing for the window to draw and a second
-        /// state machine for the model to advance — and everything the deck already does
-        /// for a card is what this one needs: a settle window, a decision recorded so it is
-        /// not dealt twice, and the card shell it is drawn in.
-        case interstitial
 
         /// Whether this is one of the user's own files. Read off the case, so there is one
         /// answer to the question.
@@ -1345,8 +1286,6 @@ public struct ProjectCard: Identifiable, Equatable, Sendable {
             if case .bigThing = self { return true }
             return false
         }
-
-        public var isInterstitial: Bool { self == .interstitial }
     }
 
     /// Which of the deck's two colours the primary button asks for.
@@ -1437,36 +1376,29 @@ public struct ProjectCard: Identifiable, Equatable, Sendable {
     /// is quoting the engine's own warning that nothing comes back — and a summary that
     /// knew only the Trash setting could not tell them apart.
     public let promiseText: String
-    /// What the primary button says: "Clean up 9.1 GB", "Delete 21.4 GB for good",
-    /// "Move 7.0 GB to Trash", or "Look through them".
+    /// What the primary button says: "Clean up 9.1 GB", "Delete 21.4 GB for good" or
+    /// "Move 7.0 GB to Trash".
     public let primaryActionTitle: String
-    /// What the button beside it says. "Skip" on every card but the interstitial, whose
-    /// secondary answers for the whole second half of the deck — "Skip them all".
+    /// What the button beside it says: "Skip".
     ///
     /// On the card rather than fixed in the view, for the same reason the primary title is:
-    /// a button whose label says it skips one thing and whose press skips fourteen is the
-    /// kind of mismatch only the model can be held to.
+    /// what a button says and what its press does are kept in one place, where a test can
+    /// hold them together.
     public let secondaryActionTitle: String
     /// The glyph after the **secondary** button's title, or `nil` on a card whose secondary
     /// answers to no key.
     ///
-    /// Decided here rather than printed by the view, which is what let the bug in: the "→"
-    /// was a literal beside a hard-coded `.keyboardShortcut(.rightArrow)`, so both survived
-    /// unchanged onto the one card where that button means something else entirely.
+    /// Decided here rather than printed by the view, beside `secondaryAnswersToArrow`, so
+    /// the glyph and the key it promises are one decision and cannot drift apart.
     public let secondaryActionKeyHint: String?
     /// Whether the bare right arrow presses the secondary button.
     ///
-    /// True on every ordinary card. Skipping one thing costs nothing and the deck is meant
-    /// to be flicked through, which is why the arrow carries no modifier.
+    /// True on every card. Skipping one thing costs nothing and the deck is meant to be
+    /// flicked through, which is why the arrow carries no modifier.
     ///
-    /// **False on the interstitial**, whose secondary is not a skip of one card but of the
-    /// whole second half of the deck. With the key bound in the view it kept its binding
-    /// while its meaning changed underneath it: a held arrow flicked through the regenerable
-    /// half, reached the interstitial and answered "Skip them all" on the next repeat —
-    /// every one of the user's own files skipped unread, which is the one set of cards that
-    /// exists to be read. The interstitial keeps Return for "Look through them", so it is
-    /// still answerable from the keyboard; what it no longer has is a key that can be held
-    /// down through it.
+    /// The card's decision rather than a literal in the view all the same. A binding fixed
+    /// in the view keeps its key whatever the button comes to mean, and a secondary that
+    /// ever answers for more than one card must be able to give the arrow up here.
     public let secondaryAnswersToArrow: Bool
     /// The glyph after that title, or `nil` on a card with no key bound to it.
     ///
@@ -1501,8 +1433,8 @@ public struct ProjectCard: Identifiable, Equatable, Sendable {
     ///
     /// A protected row is never in here, whichever kind of card it is.
     ///
-    /// **Empty on the interstitial**, which cleans nothing, and **empty on a checklist page
-    /// until something is ticked** — the rows it is drawing wait in `checklistItems`.
+    /// **Empty on a checklist page until something is ticked** — the rows it is drawing
+    /// wait in `checklistItems`.
     /// `AppModel`'s own guard refuses an empty list rather than handing the engine one, so a
     /// press on the page before anything is chosen is refused by the model as well as being
     /// dead in the window.
@@ -1519,7 +1451,7 @@ public struct ProjectCard: Identifiable, Equatable, Sendable {
     /// Whether this card's rows carry checkboxes: `DeckDealing.checklist`.
     ///
     /// The page `big.largeFiles` is dealt as. It is a **big thing** as well — `kind` is
-    /// `.bigThing`, so it sits behind the interstitial, its button is amber, it answers to no
+    /// `.bigThing`, so it is dealt after the caches, its button is amber, it answers to no
     /// key and its wording always names the Trash — and what this flag adds on top is only
     /// the boxes, plus every number on the card following them.
     ///
@@ -1731,9 +1663,8 @@ public struct ProjectCard: Identifiable, Equatable, Sendable {
     /// the key the user has been pressing.
     ///
     /// So every card that is click-only today is amber — the permanent deletions, the user's
-    /// own files, and the `~/.cache` folder whose tool the app cannot name — and the
-    /// interstitial, whose "Look through them" deletes nothing and does answer Return, stays
-    /// blue. Any card that is made click-only in future is amber the same day.
+    /// own files, and the `~/.cache` folder whose tool the app cannot name. Any card that
+    /// is made click-only in future is amber the same day.
     public var primaryActionTone: PrimaryActionTone {
         answersToReturn ? .regenerable : .deliberate
     }
@@ -1741,8 +1672,6 @@ public struct ProjectCard: Identifiable, Equatable, Sendable {
     /// Whether this is one of the user's own files. Forwarded from `kind` so a caller never
     /// has to unwrap a case to ask.
     public var isBigThing: Bool { kind.isBigThing }
-    /// Whether this is the card between the two halves of the deck.
-    public var isInterstitial: Bool { kind.isInterstitial }
 
     /// Builds a card from one project's rows.
     ///
@@ -2065,41 +1994,6 @@ public struct ProjectCard: Identifiable, Equatable, Sendable {
             revealURL: isBigThing ? path.map { URL(fileURLWithPath: $0) } : nil)
     }
 
-    /// The card between the two halves of the deck.
-    ///
-    /// Built from the big-thing cards that follow it, so its number and its count cannot
-    /// disagree with what the deck is about to deal.
-    init(interstitialFor bigThings: [ProjectCard]) {
-        let total = bigThings.reduce(into: Int64(0)) { $0 += $1.totalBytes }
-        self.init(
-            kind: .interstitial,
-            id: ProjectDeck.interstitialCardID,
-            // The group's own title, which is what every other card's eyebrow is: this card
-            // is about the big things, and naming them is what makes the headline above the
-            // buttons land.
-            eyebrow: GroupID.bigThings.title,
-            name: ProjectDeckText.interstitialHeadline,
-            pathText: nil,
-            lastChangedText: nil,
-            // No rows. It is the only card in the deck that offers nothing, which is also
-            // why `items` is empty and why `AppModel` answers it without calling the engine.
-            folders: [],
-            totalBytes: total,
-            totalText: ByteText.short(total),
-            folderCountText: ProjectDeckText.interstitialDetail(count: bigThings.count),
-            promiseText: ProjectDeckText.interstitialPromise,
-            primaryActionTitle: ProjectDeckText.interstitialPrimary,
-            secondaryActionTitle: ProjectDeckText.interstitialSecondary,
-            // **No arrow key, and no glyph promising one.** This secondary answers for the
-            // whole second half of the deck, and a bare arrow held down through the
-            // regenerable half would press it on the next repeat — see
-            // `secondaryAnswersToArrow`. Return still works on "Look through them", which
-            // costs nothing and is what keeps the card itself answerable by keyboard.
-            secondaryActionKeyHint: nil,
-            secondaryAnswersToArrow: false,
-            items: [])
-    }
-
     /// The number the card sets large, split for its two type sizes — "2.9" at 96 points,
     /// "GB" at 40.
     ///
@@ -2289,8 +2183,8 @@ public struct ProjectDeck: Equatable, Sendable {
     /// with no room for the caution, and a number that included it would advertise a large
     /// network re-download as space waiting to be had.
     ///
-    /// **The regenerable half only.** A big thing is one of the user's own files, behind the
-    /// interstitial, and nothing brings one back. Counting a 7 GB download here would be the
+    /// **The regenerable half only.** A big thing is one of the user's own files, and nothing
+    /// brings one back. Counting a 7 GB download here would be the
     /// app recommending the one deletion its own card warns hardest about, in the one place
     /// that cannot carry the warning.
     ///
@@ -2305,7 +2199,7 @@ public struct ProjectDeck: Equatable, Sendable {
     /// changed shape.
     public var defaultOfferBytes: Int64 {
         ScanResult.totalBytes(of: cards
-            .filter { !$0.isBigThing && !$0.isInterstitial }
+            .filter { !$0.isBigThing }
             .flatMap(\.items)
             .filter(\.selectedByDefault))
     }
@@ -2334,24 +2228,6 @@ public struct ProjectDeck: Equatable, Sendable {
     /// says "there is more space over here" the tallest part of the card that says what the
     /// session did.
     public static let moreToGainLines = 6
-
-    /// The identity of the card between the two halves of the deck.
-    ///
-    /// A reserved string rather than a scanner's identifier or a project's directory,
-    /// because it is neither: nothing measured it and nothing cleans it. It has to be a
-    /// stable identity all the same, so that answering the card records a decision the
-    /// session remembers and the deck does not deal it again on the next redraw.
-    ///
-    /// **It holds no `ProjectDeckSlot`.** That is the decision the plan asked for, and the
-    /// reason is that a slot is a thing with bytes: the skyline draws one bar per slot at a
-    /// height taken from its total, and "3 of 24" counts them. A zero-byte bar would be a
-    /// tower of nothing, and a card that adds one to the count would make the deck read as
-    /// longer than the number of decisions in it. So while the interstitial is on screen the
-    /// position counter is absent and no bar is `.current` — the card's own headline is what
-    /// says where the user is. `AppModel.deckSlots` and `rememberDeckOrder` filter it out,
-    /// and `ProjectDeckSummary` counts skips over the slots rather than over the decisions,
-    /// so answering it cannot appear as a skipped card either.
-    public static let interstitialCardID = "deck.bigThingsInterstitial"
 
     /// The scanner whose rows become **project** cards.
     ///
@@ -2558,11 +2434,14 @@ public struct ProjectDeck: Equatable, Sendable {
         // decision in the middle of a run of reflex ones, a dozen Return presses deep, and
         // the card's own warnings would be arriving at exactly the moment the user had
         // stopped reading them.
+        //
+        // No card stands between the two halves. There was one, and it was a screen with two
+        // buttons of its own in the middle of a run of Skip presses — the user had to move
+        // the mouse across the window to get past it. The first big thing announces itself:
+        // its button is amber, it answers to no Return, and it names the Trash.
         let regenerable = built.filter { !$0.isBigThing }.sorted(by: byDescendingTotal)
         let bigThings = built.filter(\.isBigThing).sorted(by: byDescendingTotal)
-        cards = bigThings.isEmpty
-            ? regenerable
-            : regenerable + [ProjectCard(interstitialFor: bigThings)] + bigThings
+        cards = regenerable + bigThings
         keptProjectsText = kept.isEmpty
             ? nil
             : ProjectDeckText.keptProjects(
@@ -2808,9 +2687,6 @@ public struct SkylineBar: Identifiable, Equatable, Sendable {
         /// The card on screen. Takes precedence over the decision, because during the
         /// problems state the card being read has already been cleaned and the bar under
         /// the user's eye should be the one they are looking at.
-        ///
-        /// No bar is `current` while the interstitial is on screen: it holds no slot. See
-        /// `ProjectDeck.interstitialCardID`.
         case current
         case upcoming
     }
@@ -2942,25 +2818,19 @@ public struct ProjectDeckSummary: Equatable, Sendable {
                 state: Self.state(of: slot, decisions: decisions, currentCardID: currentCardID))
         }
 
-        // Restricted to the **slots**, like the skip count below and for the same reason.
-        // It is a no-op today — the interstitial is the only card without a slot and it can
-        // never be `.cleaned`, because `AppModel.cleanCurrentProject` answers it without
-        // ever starting a run — so this is symmetry rather than a fix. Counted off the
-        // decisions, the next card that holds no slot would be free to appear in "from 4
-        // cards" with no bytes anywhere accounting for it, and an answered slot is kept
-        // whatever a later scan says, so nothing real is lost here.
+        // Restricted to the **slots**, like the skip count below. Every card the deck deals
+        // holds one today, so this is symmetry rather than a fix: counted off the decisions,
+        // a card that held no slot would be free to appear in "from 4 cards" with no bytes
+        // anywhere accounting for it, and an answered slot is kept whatever a later scan
+        // says, so nothing real is lost here.
         let slotIDs = Set(slots.map(\.id))
         cleanedCount = decisions.filter {
             guard slotIDs.contains($0.key) else { return false }
             if case .cleaned = $0.value { return true }
             return false
         }.count
-        // The same restriction, and this is the one where it is load-bearing: it keeps the
-        // interstitial out of the skip count. Answering that card — either way — records a
-        // `.skipped` decision so the deck does not deal it again, and it holds no slot
-        // because it holds no bytes; read straight off the decisions, "Skip them all" would
-        // report one more skipped card than the deck ever had, with nothing in
-        // `skippedBytes` to account for it.
+        // The same restriction, for the same reason: a skip the skyline cannot draw would be
+        // a skipped card with nothing in `skippedBytes` to account for it.
         let skippedIDs = Set(
             decisions.filter { $0.value == .skipped && slotIDs.contains($0.key) }.keys)
         skippedCount = skippedIDs.count

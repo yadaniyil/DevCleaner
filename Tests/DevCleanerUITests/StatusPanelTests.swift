@@ -93,8 +93,7 @@ import CleanerCore
 
 /// The user's own large files are never in the amount.
 ///
-/// They are the second half of the deck, behind an interstitial, and nothing brings one
-/// back. A menu bar counting a 7 GB download as reclaimable would be the app recommending
+/// They are the second half of the deck, and nothing brings one back. A menu bar counting a 7 GB download as reclaimable would be the app recommending
 /// the one deletion its own card warns hardest about — and it would be doing it in the one
 /// place with no room for the warning.
 @Test func theUsersOwnFilesAreNeverInTheAmount() {
@@ -565,15 +564,14 @@ import CleanerCore
     #expect(panel.amountDetail == "at least — in 1 card. Your own big files are extra.")
 }
 
-/// **No bar is ever one of the user's own files, the interstitial, or a cache nothing
-/// cleans.**
+/// **No bar is ever one of the user's own files or a cache nothing cleans.**
 ///
-/// The three exclusions `ProjectDeck.defaultOfferBytes` makes, held at the other end: the
+/// The exclusions `ProjectDeck.defaultOfferBytes` makes, held at the other end: the
 /// bars are what the number is made of, so anything the number leaves out must not appear
 /// beside it. A 7 GB download drawn as a bar under "ready to clean up" would be the panel
 /// recommending the one deletion the deck warns hardest about, in the one place with no room
 /// for the warning; a browser cache drawn there has no button anywhere in the app.
-@Test func noBarIsEverABigThingTheInterstitialOrACacheNothingCleans() {
+@Test func noBarIsEverABigThingOrACacheNothingCleans() {
     let panel = panelFor([
         toolRow(name: "Derived data", relativePath: "Library/Developer/Xcode/DerivedData",
                 sizeBytes: 9_100_000_000),
@@ -587,7 +585,6 @@ import CleanerCore
     #expect(panel.rows.map(\.title) == ["Derived data"])
     #expect(panel.moreText == nil)
     #expect(panel.amountText == "9.1 GB")
-    #expect(!panel.rows.contains { $0.id == ProjectDeck.interstitialCardID })
 }
 
 /// No fold line when every card already has a bar. "and 0 more · 0 KB" under four bars that

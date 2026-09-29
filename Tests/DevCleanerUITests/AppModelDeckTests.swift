@@ -857,8 +857,8 @@ private func mixedRows() -> [CleanupItem] {
 
 /// "Go through skipped again" is refused while a card is showing its result, the same rule
 /// Skip and Clean up follow. The button only ever exists on the end card, so this cannot be
-/// reached by clicking — but forgetting every skip while a run is in flight would deal a card
-/// out from under it, and a model that answers the question is a model a test can ask.
+/// reached by clicking — but starting over while a run is in flight would deal a card out
+/// from under it, and a model that answers the question is a model a test can ask.
 @MainActor
 @Test func goingBackThroughSkippedIsRefusedWhileACardIsShowingItsResult() async throws {
     let temp = TempDir()
@@ -1120,8 +1120,10 @@ private func mixedRows() -> [CleanupItem] {
 
 // MARK: - going back through the skipped ones
 
+/// "Go through skipped again" is a **fresh pass over what is left**: the strip holds exactly
+/// the cards still there, and the deck starts at the first of them.
 @MainActor
-@Test func reviewingTheSkippedProjectsBringsThoseCardsBack() async throws {
+@Test func goingBackThroughSkippedStartsAFreshPassOnWhatIsLeft() async throws {
     let temp = TempDir()
     let cache = ScanCache(directory: temp.url)
     var engine = FakeEngine()
@@ -1140,15 +1142,49 @@ private func mixedRows() -> [CleanupItem] {
     model.reviewSkippedProjects()
     handPauses(clock)
 
-    // Both skipped cards are back, in the order the session dealt them.
+    // Both skipped cards are back, from the first.
+    #expect(model.sessionCards.map(\.name) == ["site", "game"])
     #expect(model.currentProjectCard?.name == "site")
+    #expect(model.deckSummary?.positionText == "1 of 2")
+    // The cleaned one is not: its folders are gone, so it has no card and no bar. The strip
+    // is only what this pass is about to ask, which is why the totals start again too.
+    #expect(model.deckSummary?.skyline.map(\.state) == [.current, .upcoming])
     #expect(model.deckSummary?.skippedText == nil)
-    // The cleaned one is not: its folders are gone, and it is what the session total and
-    // the skyline are built from.
-    #expect(model.projectDecisions["\(testHome)/dev/tool"]
-        == .cleaned(trashedBytes: 2_000_000_000, deletedBytes: 0, problems: []))
-    #expect(model.deckSessionBytes == 2_000_000_000)
-    #expect(model.deckSummary?.skyline.map(\.state) == [.current, .cleaned, .upcoming])
+    #expect(model.deckSessionBytes == 0)
+}
+
+/// **The bug this pass fixes.** A skipped card whose folders a later scan no longer finds
+/// kept its bar, because an answered slot is the session's history. Going back through the
+/// skipped ones used to forget the skip and keep the slot, so the bar came back as
+/// "upcoming" — and the deck could never deal it, having no card for it. The deck started at
+/// "2 of 3" with a bar on its left it would never visit. The app lives in the menu bar for
+/// days, and a week of scans left a real strip with a run of those in front of the middle.
+@MainActor
+@Test func goingBackThroughSkippedStartsAtTheFirstBarEvenWhenASkippedFolderHasGone() async throws {
+    let temp = TempDir()
+    let cache = ScanCache(directory: temp.url)
+    // The scan after the skips no longer finds `site` — a `rm -rf node_modules` in a
+    // terminal is enough.
+    let withoutSite = threeProjects().filter { !$0.id.contains("/dev/site/") }
+    let clock = MovableClock()
+    let model = try makeDeckModel(
+        threeProjects(), cache: cache,
+        engine: FakeEngine(result: makeResult(withoutSite)), clock: clock.read)
+
+    model.skipCurrentProject()          // site
+    model.skipCurrentProject()          // tool
+    model.skipCurrentProject()          // game
+    #expect(model.currentProjectCard == nil)
+    #expect(model.startScan())
+    #expect(await waitUntilIdle(model))
+    // The skip is history, so its bar stays on the end card.
+    #expect(model.deckSummary?.skyline.count == 3)
+
+    model.reviewSkippedProjects()
+
+    #expect(model.currentProjectCard?.name == "tool")
+    #expect(model.deckSummary?.positionText == "1 of 2")
+    #expect(model.deckSummary?.skyline.map(\.state) == [.current, .upcoming])
 }
 
 // MARK: - a fresh scan landing under a deck in progress
@@ -1741,8 +1777,7 @@ private func mixedRows() -> [CleanupItem] {
 
 // MARK: - the card between the two halves of the deck
 
-/// One cache and two of the user's own files, so the deck has both halves and an
-/// interstitial between them.
+/// One cache and two of the user's own files, so the deck has both halves.
 private func twoHalves() -> [CleanupItem] {
     [
         xdgCacheRow(name: "uv", sizeBytes: 1_100_000_000),
@@ -1752,144 +1787,42 @@ private func twoHalves() -> [CleanupItem] {
     ]
 }
 
+/// **Nothing stands between the halves.** The first of the user's own files is dealt
+/// straight after the last cache, so the Skip the user has been pressing goes on working.
+/// There used to be a card between them with two buttons of its own, and getting past it
+/// meant moving the mouse across the window.
+///
+/// The first big thing still says the promise changed, with the card itself: it answers to
+/// no Return, and its bar is counted like any other.
 @MainActor
-@Test func theDeckDealsTheInterstitialBeforeTheFirstOfTheUsersOwnFiles() throws {
+@Test func theUsersOwnFilesAreDealtStraightAfterTheCaches() throws {
     let temp = TempDir()
+    let clock = MovableClock()
     let model = try makeDeckModel(twoHalves(), cache: ScanCache(directory: temp.url),
-                                  engine: FakeEngine())
+                                  engine: FakeEngine(), clock: clock.read)
 
     #expect(model.sessionCards.map(\.name) == [
-        "uv", ProjectDeckText.interstitialHeadline,
-        "lmstudio-community/Qwen3-30B-GGUF", "Xcode_26.1_beta.xip",
-    ])
-    // It holds no slot, so the counter counts the three cards that hold bytes.
-    #expect(model.deckSlots.map(\.id) == [
-        "other.xdgCache|/Users/test/.cache/uv",
-        "big.aiModels|/Users/test/.lmstudio/models/lmstudio-community/Qwen3-30B-GGUF",
-        "big.downloads|/Users/test/Downloads/Xcode_26.1_beta.xip",
+        "uv", "lmstudio-community/Qwen3-30B-GGUF", "Xcode_26.1_beta.xip",
     ])
     #expect(model.deckSlots.map(\.isBigThing) == [false, true, true])
     #expect(model.deckSummary?.positionText == "1 of 3")
-}
-
-/// "Look through them" **removes nothing**. It notes the card as answered and lets the deck
-/// deal the first of the user's own files.
-@MainActor
-@Test func lookingThroughTheBigThingsRemovesNothingAndDealsTheFirstOne() async throws {
-    let temp = TempDir()
-    let engine = FakeEngine()
-    let clock = MovableClock()
-    let model = try makeDeckModel(twoHalves(), cache: ScanCache(directory: temp.url),
-                                  engine: engine, clock: clock.read)
-
-    // Past the cache card first, so the interstitial is the one on screen.
-    model.skipCurrentProject()
-    handPauses(clock)
-    #expect(model.currentProjectCard?.isInterstitial == true)
-    // No position while it is up: it holds no slot.
-    #expect(model.deckSummary?.positionText == nil)
-
-    #expect(model.cleanCurrentProject())
-
-    #expect(model.currentProjectCard?.name == "lmstudio-community/Qwen3-30B-GGUF")
-    #expect(model.deckSummary?.positionText == "2 of 3")
-    // Nothing was handed to the engine, and nothing about the session moved.
-    #expect(await engine.log.cleans.isEmpty)
-    #expect(model.deckSessionBytes == 0)
-    #expect(!model.isBusy)
-    // It is not counted as a skipped card either, although it recorded a decision so the
-    // deck does not deal it twice.
-    #expect(model.deckSummary?.skippedCount == 1)
-    #expect(model.deckSummary?.skippedBytes == 1_100_000_000)
-}
-
-/// "Skip them all" answers for the whole second half at once — and records each card
-/// separately, so every one keeps its slot, its bar and its share of the skipped total.
-@MainActor
-@Test func skippingThemAllAnswersEveryOneOfTheUsersOwnFiles() async throws {
-    let temp = TempDir()
-    let engine = FakeEngine()
-    let clock = MovableClock()
-    let model = try makeDeckModel(twoHalves(), cache: ScanCache(directory: temp.url),
-                                  engine: engine, clock: clock.read)
 
     model.skipCurrentProject()          // the cache card
-    handPauses(clock)
-    #expect(model.currentProjectCard?.isInterstitial == true)
-    model.skipCurrentProject()          // "Skip them all"
 
-    // The deck is finished: there is nothing left to ask.
+    let card = try #require(model.currentProjectCard)
+    #expect(card.name == "lmstudio-community/Qwen3-30B-GGUF")
+    #expect(card.answersToReturn == false)
+    #expect(card.secondaryAnswersToArrow)
+    #expect(model.deckSummary?.positionText == "2 of 3")
+
+    // And Skip goes on skipping one card at a time to the end.
+    model.skipCurrentProject()
+    model.skipCurrentProject()
     #expect(model.currentProjectCard == nil)
-    #expect(await engine.log.cleans.isEmpty)
     let summary = try #require(model.deckSummary)
     #expect(summary.skippedCount == 3)
     #expect(summary.skippedBytes == 26_100_000_000)
     #expect(summary.skyline.map(\.state) == [.skipped, .skipped, .skipped])
-    #expect(summary.endDetailLines == [ProjectDeckText.endDetailNothingCleaned])
-}
-
-/// Going back through the skipped ones brings the interstitial back too, which is right: the
-/// user is about to be asked about their own files again, and that is the card that says so.
-@MainActor
-@Test func goingBackThroughSkippedBringsTheInterstitialBack() throws {
-    let temp = TempDir()
-    let clock = MovableClock()
-    let model = try makeDeckModel(twoHalves(), cache: ScanCache(directory: temp.url),
-                                  engine: FakeEngine(), clock: clock.read)
-
-    model.skipCurrentProject()
-    handPauses(clock)
-    model.skipCurrentProject()          // "Skip them all"
-    #expect(model.currentProjectCard == nil)
-
-    model.reviewSkippedProjects()
-
-    #expect(model.currentProjectCard?.name == "uv")
-    #expect(model.sessionCards.map(\.isInterstitial) == [false, true, false, false])
-}
-
-/// **The interstitial obeys the settle window like any card.** Its primary button sits
-/// exactly where Clean up sat on the card before it, and a held Return must not carry
-/// through — which it would if the card were answered by a path of its own.
-@MainActor
-@Test func theInterstitialRefusesToBeAnsweredInsideTheSettleWindow() throws {
-    let temp = TempDir()
-    let clock = MovableClock()
-    let model = try makeDeckModel(twoHalves(), cache: ScanCache(directory: temp.url),
-                                  engine: FakeEngine(), clock: clock.read)
-
-    model.skipCurrentProject()          // the deck has just moved
-    #expect(model.currentProjectCard?.isInterstitial == true)
-
-    #expect(model.cleanCurrentProject() == false)
-    #expect(model.currentProjectCard?.isInterstitial == true)
-
-    handPauses(clock)
-    #expect(model.cleanCurrentProject())
-    #expect(model.currentProjectCard?.isInterstitial == false)
-}
-
-/// The interstitial stays where it belongs after a decision fixes the deck's order.
-///
-/// It holds no slot, so it cannot come out of the remembered order — appended with the rest
-/// of the cards the session has not seen, it would land *after* the big things it is
-/// supposed to introduce. `AppModel.sessionCards` splices it back in instead.
-@MainActor
-@Test func theInterstitialStaysBeforeTheBigThingsAfterTheOrderIsFixed() throws {
-    let temp = TempDir()
-    let clock = MovableClock()
-    let model = try makeDeckModel(twoHalves(), cache: ScanCache(directory: temp.url),
-                                  engine: FakeEngine(), clock: clock.read)
-
-    // The first decision is what fixes the order, and from then on `sessionCards` is built
-    // from the slots.
-    model.skipCurrentProject()
-    handPauses(clock)
-
-    #expect(model.sessionCards.map(\.name) == [
-        "uv", ProjectDeckText.interstitialHeadline,
-        "lmstudio-community/Qwen3-30B-GGUF", "Xcode_26.1_beta.xip",
-    ])
 }
 
 /// Cleaning one of the user's own files hands the engine **that one row** and prunes it, the
@@ -1905,8 +1838,6 @@ private func twoHalves() -> [CleanupItem] {
                                   clock: clock.read)
 
     model.skipCurrentProject()          // the cache card
-    handPauses(clock)
-    model.cleanCurrentProject()         // "Look through them"
     handPauses(clock)
 
     let card = try #require(model.currentProjectCard)
@@ -1944,11 +1875,8 @@ private func largeFilePage() -> [CleanupItem] {
     ]
 }
 
-/// A model with the page on screen: the interstitial answered, the settle window open.
-///
-/// The page is a big thing, so there is always a card in front of it — that is the whole of
-/// what the interstitial is for — and every test below starts from the same two presses a
-/// user would make.
+/// A model with the page on screen. It is the only card, so it is the first one dealt, and the
+/// first card of a session is never inside the settle window.
 @MainActor
 private func modelShowingTheChecklistPage(
     _ rows: [CleanupItem], cache: ScanCache, engine: FakeEngine, clock: MovableClock,
@@ -1956,9 +1884,7 @@ private func modelShowingTheChecklistPage(
 ) throws -> AppModel {
     let model = try makeDeckModel(
         rows, cache: cache, engine: engine, clock: clock.read, sleeper: sleeper)
-    #expect(model.currentProjectCard?.isInterstitial == true)
-    #expect(model.cleanCurrentProject())              // "Look through them"
-    handPauses(clock)
+    #expect(model.currentProjectCard?.isChecklist == true)
     return model
 }
 
@@ -2282,8 +2208,6 @@ private func modelShowingTheChecklistPage(
     // ticked — nor can an identifier nothing on the page carries.
     model.skipCurrentProject()
     handPauses(clock)
-    #expect(model.cleanCurrentProject())              // "Look through them"
-    handPauses(clock)
     #expect(model.currentProjectCard?.isChecklist == true)
 
     model.setChecklistRow(cacheRow.id, ticked: true)
@@ -2338,12 +2262,12 @@ private func modelShowingTheChecklistPage(
 /// only a new big thing goes on the end.**
 ///
 /// Appending everything is what the deck used to do, and it put a card like `fresh` — blue,
-/// Return live, "Clean up 20.0 GB" — into the half the interstitial has just promised is the
-/// user's own and click-only. It happens on an ordinary launch: the window opens on the cached
+/// Return live, "Clean up 20.0 GB" — among the user's own files, where every other card is
+/// amber and click-only. It happens on an ordinary launch: the window opens on the cached
 /// scan, Skip keeps working through the 51-second launch scan, and whatever that scan has
 /// newly found lands in an order a skip has already fixed.
 @MainActor
-@Test func aNewlyFoundCardIsDealtOnItsOwnSideOfTheInterstitial() async throws {
+@Test func aNewlyFoundCardIsDealtOnItsOwnSideOfTheDeck() async throws {
     let temp = TempDir()
     let cache = ScanCache(directory: temp.url)
     let fresh = folderRow(project: "fresh", folder: "build", sizeBytes: 20_000_000_000)
@@ -2356,16 +2280,15 @@ private func modelShowingTheChecklistPage(
         engine: FakeEngine(result: makeResult(twoHalves() + [fresh, docker])))
 
     model.skipCurrentProject()          // the cache card, which fixes the order
-    #expect(model.currentProjectCard?.isInterstitial == true)
+    #expect(model.currentProjectCard?.isBigThing == true)
 
     #expect(model.startScan())
     #expect(await waitUntilIdle(model))
 
     #expect(model.sessionCards.map(\.name) == [
         "uv",
-        // In front of the card that says the promise changes, where it belongs.
+        // In front of the first of the user's own files, where it belongs.
         "fresh",
-        ProjectDeckText.interstitialHeadline,
         "lmstudio-community/Qwen3-30B-GGUF", "Xcode_26.1_beta.xip",
         // And the new big thing on the end, behind the 7 GB card it is bigger than.
         "Docker.dmg",

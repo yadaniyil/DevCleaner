@@ -100,8 +100,8 @@ public enum StatusPanelText {
     /// deck the number deliberately ignores.
     ///
     /// The count is the cards the amount is **made of** — see `StatusPanelModel.rows` — and
-    /// not the length of the deck, which also holds the cards behind the interstitial and
-    /// any card offering nothing by default. Through `ProjectDeckText.counted`, like every
+    /// not the length of the deck, which also holds the user's own big files and any card
+    /// offering nothing by default. Through `ProjectDeckText.counted`, like every
     /// other plural in this app, so a tidy machine cannot read "in 1 cards".
     public static func amountDetail(cardCount: Int) -> String {
         "\(amountPrefix) — in " + ProjectDeckText.counted(cardCount, "card")
@@ -330,8 +330,8 @@ public struct StatusPanelModel: Sendable, Equatable {
         // One value read twice, in one statement, so the two cannot come from two totals.
         amountHeadline = amountText.map(SizeHeadline.init)
         // The count is the cards with a share, which is `shares` — not `deck.cards.count`,
-        // which includes the user's own files, the interstitial and any card the deck deals
-        // with nothing ticked on it.
+        // which includes the user's own files and any card the deck deals with nothing
+        // ticked on it.
         amountDetail = hasAmount
             ? StatusPanelText.amountDetail(cardCount: shares.count)
             : nil
@@ -368,7 +368,7 @@ public struct StatusPanelModel: Sendable, Equatable {
     /// the cards that contribute nothing left out.
     ///
     /// **This is that total taken apart, and it has to add back up to it.** So it repeats
-    /// the total's three rules exactly: only the cards in front of the interstitial, because
+    /// the total's three rules exactly: only the cards in front of the big things, because
     /// the user's own files are not in the amount; only `selectedByDefault` rows, because a
     /// row a card holds back is not; and each `DeletionMethod` counted **once across the
     /// whole half**, in the order `ProjectDeck.defaultOfferBytes` flattens the cards, which
@@ -391,7 +391,7 @@ public struct StatusPanelModel: Sendable, Equatable {
     static func shares(in deck: ProjectDeck) -> [(card: ProjectCard, bytes: Int64)] {
         var seen: Set<DeletionMethod> = []
         var shares: [(card: ProjectCard, bytes: Int64)] = []
-        for card in deck.cards where !card.isBigThing && !card.isInterstitial {
+        for card in deck.cards where !card.isBigThing {
             var bytes: Int64 = 0
             for item in card.items where item.selectedByDefault {
                 guard seen.insert(item.method).inserted else { continue }

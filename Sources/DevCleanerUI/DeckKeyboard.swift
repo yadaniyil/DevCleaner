@@ -43,9 +43,9 @@ public enum DeckKeyboard {
     ///
     /// **The key code** keeps it to Return. The right arrow is held down through the deck on
     /// purpose — skipping removes nothing, and flicking through twenty-four cards is the deck
-    /// working as intended — so a rule about every repeat would take that away. What made the
-    /// arrow dangerous was the interstitial's secondary meaning "skip them all", and that is
-    /// fixed where it belongs, on the card: see `ProjectCard.secondaryAnswersToArrow`.
+    /// working as intended — so a rule about every repeat would take that away. Whether a
+    /// card lets the arrow press its secondary at all is the card's decision: see
+    /// `ProjectCard.secondaryAnswersToArrow`.
     ///
     /// **The window** keeps it out of everything else the app puts on screen. The settings
     /// window holds text fields, where a held Return is nobody's business but the field's.

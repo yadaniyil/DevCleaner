@@ -223,11 +223,9 @@ struct MainWindowView: View {
     /// with no scan in it. Moving the shortcut up to this function, or adding a second Skip
     /// anywhere, would take the arrow key away from whatever those states put on screen.
     ///
-    /// **Which card the arrow answers for is the card's decision, not this file's.** It used
-    /// to be a literal here, and so it kept its binding while the button's meaning changed
-    /// underneath it: on the interstitial that secondary is "Skip them all", and an arrow
-    /// held through the first half of the deck pressed it on the next repeat — every one of
-    /// the user's own files skipped unread. See `ProjectCard.secondaryAnswersToArrow`.
+    /// **Which card the arrow answers for is the card's decision, not this file's.** A
+    /// literal here keeps its binding whatever the button comes to mean. See
+    /// `ProjectCard.secondaryAnswersToArrow`.
     @ViewBuilder
     private func actions(card: ProjectCard?, summary: ProjectDeckSummary?) -> some View {
         VStack(spacing: 10) {
@@ -267,27 +265,20 @@ struct MainWindowView: View {
         HStack(spacing: 10) {
             Button {
                 lastAnswer = .skipped
-                // One call for both meanings. On an ordinary card it skips that card; on
-                // the interstitial it skips every one of the user's own files at once,
-                // which is what its label says — `AppModel.skipCurrentProject` owns the
-                // difference, because a window choosing between two model calls for a
-                // button whose title it did not write is a window that can put the wrong
-                // words on the wrong action.
                 model.skipCurrentProject()
             } label: {
                 // The width is the label's, so the bezel itself is this wide. A frame on the
                 // button only reserves the space and leaves the bezel hugging the word.
-                // Wider on the interstitial, whose "Skip them all" does not fit 104 points.
                 //
                 // The glyph is the card's, decided beside the shortcut below, so a "→" can
                 // never be printed on a button no arrow presses.
                 ActionTitle(title: card.secondaryActionTitle, hint: card.secondaryActionKeyHint)
-                    .frame(width: card.isInterstitial ? nil : 104)
+                    .frame(width: 104)
             }
             .buttonStyle(DeckButtonStyle(.secondary))
             // A bare arrow, no modifier, on every card that skips one thing: the deck is a
-            // thing you flick through, and the other hand is on Return. `nil` removes the
-            // shortcut on the one card where the same button answers for fourteen.
+            // thing you flick through, and the other hand is on Return. `nil` would remove
+            // the shortcut on a card whose secondary answers for more than one card.
             .keyboardShortcut(card.secondaryAnswersToArrow
                 ? KeyboardShortcut(.rightArrow, modifiers: []) : nil)
             // Dead while a clean is running — anybody's — and never merely while the app

@@ -260,7 +260,7 @@ private let large: Int64 = 4_000_000_000
     #expect(items.map(\.name) == ["gpt2", "ml-labs/whisper-large-v3-gguf"])
     #expect(items.map(\.method) == [.removePath(gpt2), .removePath(whisper)])
     // The same treatment as an LM Studio model, and every part of it matters: the group
-    // sorts it behind the interstitial, `.irreplaceable` makes the executor always trash it
+    // deals it after every cache, `.irreplaceable` makes the executor always trash it
     // whatever `moveToTrash` says, and `startsUnticked` keeps it out of every default clean.
     #expect(items.allSatisfy { $0.group == .bigThings })
     #expect(items.allSatisfy { $0.risk == .irreplaceable })

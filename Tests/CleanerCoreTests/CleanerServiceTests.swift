@@ -119,8 +119,8 @@ private func row(_ name: String, path: String, size: Int64,
         ("other.electronCaches", .otherCaches),
         ("big.downloads", .bigThings),
         ("big.aiModels", .bigThings),
-        // Last of all, which is where the deck's interstitial and the "biggest first"
-        // ordering of the big things both expect to find it.
+        // Last of all, which is where the deck's "caches first, then the user's own files"
+        // ordering expects to find it.
         ("big.largeFiles", .bigThings),
     ]
     #expect(listed.map(\.0) == expected.map(\.0))
