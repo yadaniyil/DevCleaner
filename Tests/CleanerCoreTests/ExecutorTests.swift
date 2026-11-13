@@ -2394,3 +2394,126 @@ private func bigThingItem(_ path: String, name: String) -> CleanupItem {
     // `big.aiModels` cannot name two different Ollama stores.
     #expect(PathGuard.runRelativeExactPaths.contains(AIModelScanner.ollamaRelativeRoot))
 }
+
+// MARK: - SimLease
+
+private func simulatorItem(_ udid: String, name: String = "qa-01") -> CleanupItem {
+    CleanupItem(
+        id: "ios.simulators|\(udid)", scannerID: "ios.simulators", group: .xcodeAndIOS,
+        name: name, detail: nil, sizeBytes: 3_100_000_000, lastUsed: nil, risk: .elevated,
+        protection: nil, method: .deleteSimulator(udid: udid))
+}
+
+private func avdItem(_ name: String) -> CleanupItem {
+    CleanupItem(
+        id: "android.avds|\(name)", scannerID: "android.avds", group: .android,
+        name: name, detail: nil, sizeBytes: 6_000_000_000, lastUsed: nil, risk: .elevated,
+        protection: nil, method: .deleteAVD(name: name))
+}
+
+/// An executor that **would** delete an AVD: `avdmanager` exists, and adb (the recording
+/// runner) answers that nothing is running. So a refusal below is the SimLease check and
+/// nothing else.
+private func makeEmulatorExecutor(temp: TempDir, runner: RecordingProcessRunner) -> Executor {
+    _ = makeExecutableFile(temp, "Library/Android/sdk/cmdline-tools/latest/bin/avdmanager")
+    return Executor(
+        guard: PathGuard(allowedRoots: [temp.path + "/allowed"], forbiddenTargets: []),
+        runner: runner, remover: FakeFileRemover(), fileManager: .default,
+        home: temp.path, moveToTrash: true,
+        androidSDKPath: temp.path + "/Library/Android/sdk")
+}
+
+/// The second layer, for the gap a cached scan leaves: the row was written before qa-01 was
+/// pinned, so it carries no protection at all. The run reads SimLease again and refuses.
+@Test func refusesASimLeasePinnedSimulatorEvenWhenTheRowCarriesNoProtection() async throws {
+    let temp = TempDir()
+    let runner = RecordingProcessRunner()
+    let udid = "5D2E8A10-7C41-4B9E-9F3A-1C6B0E2D4A71"
+
+    let record = await makeExecutor(temp: temp, runner: runner)
+        .run(items: [simulatorItem(udid)], devices: .empty,
+             simLease: SimLeaseState(pinnedUDIDs: [udid.lowercased()]),
+             startedAt: startedAt, progress: { _ in })
+
+    #expect(!runner.recorded.contains { $0.contains("simctl delete") })
+    let entry = try #require(record.entries.first)
+    #expect(entry.outcome == .skipped)
+    #expect(entry.reason
+        == "pinned in SimLease; removing it cannot be undone, so it was left alone")
+    #expect(record.permanentlyDeletedBytes == 0)
+    #expect(!record.notes.contains(Executor.Note.devicesWereRemovedPermanently))
+}
+
+@Test func refusesASimulatorLeasedInSimLeaseAndSaysWhoHasIt() async throws {
+    let temp = TempDir()
+    let runner = RecordingProcessRunner()
+    let lease = SimLeaseLease(deviceID: "AAA", deviceName: "iPhone 17", owner: "agent-one",
+                              expiresAt: startedAt.addingTimeInterval(600))
+
+    let record = await makeExecutor(temp: temp, runner: runner)
+        .run(items: [simulatorItem("AAA", name: "iPhone 17")], devices: .empty,
+             simLease: SimLeaseState(leases: [lease]),
+             startedAt: startedAt, progress: { _ in })
+
+    #expect(!runner.recorded.contains { $0.contains("simctl delete") })
+    let entry = try #require(record.entries.first)
+    #expect(entry.outcome == .skipped)
+    #expect(entry.reason?.hasPrefix("leased by agent-one in SimLease") == true)
+}
+
+@Test func refusesAnAVDWithALeasedInstanceEvenThoughAdbSeesNothingRunning() async throws {
+    let temp = TempDir()
+    let runner = RecordingProcessRunner()
+    let lease = SimLeaseLease(deviceID: "emulator-5560", deviceName: "work_avd",
+                              owner: "ui-check",
+                              expiresAt: startedAt.addingTimeInterval(600))
+
+    let record = await makeEmulatorExecutor(temp: temp, runner: runner)
+        .run(items: [avdItem("work_avd")], devices: .empty,
+             simLease: SimLeaseState(leases: [lease]),
+             startedAt: startedAt, progress: { _ in })
+
+    #expect(!runner.recorded.contains { $0.contains("avdmanager") })
+    let entry = try #require(record.entries.first)
+    #expect(entry.outcome == .skipped)
+    #expect(entry.reason?.hasPrefix("leased by ui-check in SimLease") == true)
+}
+
+/// An emulator lease that does not say which AVD it runs could be running any of them.
+@Test func refusesEveryAVDWhileAnEmulatorLeaseCannotBeRead() async throws {
+    let temp = TempDir()
+    let runner = RecordingProcessRunner()
+
+    let record = await makeEmulatorExecutor(temp: temp, runner: runner)
+        .run(items: [avdItem("work_avd"), avdItem("sample_emulator")], devices: .empty,
+             simLease: SimLeaseState(emulatorsInDoubt: true),
+             startedAt: startedAt, progress: { _ in })
+
+    #expect(!runner.recorded.contains { $0.contains("avdmanager") })
+    #expect(record.entries.map(\.outcome) == [.skipped, .skipped])
+    #expect(record.entries.allSatisfy {
+        $0.reason?.hasPrefix("SimLease state could not be read") == true
+    })
+}
+
+/// The over-fix guard for the four refusals above. SimLease holding one device must not
+/// stop the run deleting the ones it does not hold.
+@Test func devicesSimLeaseDoesNotHoldAreStillDeleted() async throws {
+    let temp = TempDir()
+    let runner = RecordingProcessRunner()
+    let simLease = SimLeaseState(
+        pinnedUDIDs: ["5D2E8A10-7C41-4B9E-9F3A-1C6B0E2D4A71"],
+        leases: [SimLeaseLease(deviceID: "emulator-5560", deviceName: "work_avd",
+                               owner: "ui-check",
+                               expiresAt: startedAt.addingTimeInterval(600))])
+
+    let record = await makeEmulatorExecutor(temp: temp, runner: runner)
+        .run(items: [simulatorItem("OLD", name: "sample-ios-simulator"),
+                     avdItem("old_emulator")],
+             devices: .empty, simLease: simLease,
+             startedAt: startedAt, progress: { _ in })
+
+    #expect(runner.recorded.contains { $0.contains("simctl delete OLD") })
+    #expect(runner.recorded.contains { $0.contains("avdmanager delete avd -n old_emulator") })
+    #expect(record.entries.map(\.outcome) == [.deleted, .deleted])
+}

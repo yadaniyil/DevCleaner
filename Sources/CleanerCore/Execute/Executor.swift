@@ -528,9 +528,15 @@ public struct Executor: @unchecked Sendable {
     /// synchronous loop is a test that passes on an idle machine and fails on a busy one.
     /// The default is the real thing, so `CleanerService.clean` is unchanged and the menu
     /// bar app's `task.cancel()` works.
+    ///
+    /// `simLease` is SimLease's state **as of this run**, read fresh by `CleanerService.clean`
+    /// the same way `devices` is. A row may have come out of a `cache.json` written days ago,
+    /// when the device it names was nobody's; an agent can have leased it since. It defaults
+    /// to nothing held so that every existing caller compiles unchanged.
     public func run(
         items: [CleanupItem],
         devices: DeviceInventory,
+        simLease: SimLeaseState = .empty,
         startedAt: Date,
         isCancelled: @Sendable () -> Bool = { Task.isCancelled },
         progress: @Sendable (ExecutionProgress) -> Void
@@ -590,7 +596,7 @@ public struct Executor: @unchecked Sendable {
                     reason: Self.cancelledReason))
             } else {
                 entries.append(perform(item, emulators: emulators, bootedSimulators: booted,
-                                       runtimeImages: runtimeImages))
+                                       simLease: simLease, runtimeImages: runtimeImages))
             }
             // Reported for a skipped row too, so the counter the card shows still
             // reaches its total instead of stopping part way with no explanation.
@@ -710,9 +716,18 @@ public struct Executor: @unchecked Sendable {
         }
     }
 
+    /// The reason on a device row SimLease holds: "pinned in SimLease; removing it cannot be
+    /// undone, so it was left alone".
+    ///
+    /// Lower case and a full clause, like `cancelledReason`, because
+    /// `RunRecord.unfinishedReasons` prints it as "\(name): \(reason)".
+    static func heldBySimLeaseReason(_ reason: ProtectionReason) -> String {
+        "\(reason.description); removing it cannot be undone, so it was left alone"
+    }
+
     private func perform(
         _ item: CleanupItem, emulators: RunningEmulators, bootedSimulators: Set<String>,
-        runtimeImages: [String: [String]]
+        simLease: SimLeaseState, runtimeImages: [String: [String]]
     ) -> RunEntry {
         func entry(_ outcome: ItemOutcome, target: String,
                    trashedTo: String? = nil, reason: String? = nil) -> RunEntry {
@@ -773,6 +788,13 @@ public struct Executor: @unchecked Sendable {
         // simctl removes outright and has no Trash equivalent, so `moveToTrash` cannot
         // apply to them however it is set.
         case .deleteSimulator(let udid):
+            // SimLease first: pinned there, leased right now, or SimLease state that could
+            // not be read. The same second layer as the booted check below, over the same
+            // kind of gap — the row carries no protection because the scan that made it
+            // predates the pin or the lease. `.skipped`, because nothing was attempted.
+            if let held = simLease.reason(forSimulator: udid) {
+                return entry(.skipped, target: udid, reason: Self.heldBySimLeaseReason(held))
+            }
             // The same refusal as a running emulator two cases below, and for the same
             // reason: the user is working in it right now, and `simctl delete` removes the
             // device directory — every installed app, its databases, its user defaults —
@@ -828,6 +850,12 @@ public struct Executor: @unchecked Sendable {
                         reason: failures.joined(separator: "; "))
 
         case .deleteAVD(let name):
+            // Before adb is asked, and whatever it answers. The lease is the more specific
+            // answer — it names who holds the AVD — and the only one of the two that does not
+            // depend on an emulator process being up at this instant.
+            if let held = simLease.reason(forAVD: name) {
+                return entry(.skipped, target: name, reason: Self.heldBySimLeaseReason(held))
+            }
             switch emulators {
             case .unknown(let cause):
                 // Not knowing is treated the same as knowing it is running, and for the
