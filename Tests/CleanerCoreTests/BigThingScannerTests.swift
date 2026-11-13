@@ -459,7 +459,7 @@ private let large: Int64 = 4_000_000_000
         runner: FakeProcessRunner(responses: [:]), remover: FakeFileRemover(),
         sizeMeasurer: FixedSizeMeasurer([installer: 7_000_000_000, cache: 1_100_000_000]),
         fileManager: .default, home: temp.path,
-        androidSDKPath: temp.path + "/sdk", clock: { now })
+        androidSDKPath: temp.path + "/sdk", simLease: simLeaseReader(in: temp), clock: { now })
 
     let result = await ScanEngine(scanners: [DownloadsScanner(), XDGCacheScanner()])
         .scan(context: context(temp: temp, sizes: [

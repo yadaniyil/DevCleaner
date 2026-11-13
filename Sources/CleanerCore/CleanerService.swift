@@ -54,8 +54,12 @@ public struct CleanerService: @unchecked Sendable {
     private let fileManager: FileManager
     private let home: String
     private let androidSDKPath: String
+    private let simLease: SimLeaseReader
     private let clock: @Sendable () -> Date
 
+    /// `simLease` defaults to the real places SimLease keeps its pins and leases, the same
+    /// way `runner` defaults to the real processes — so a production caller cannot build a
+    /// service that has forgotten them. Tests pass a reader over temporary directories.
     public init(
         settingsStore: SettingsStore,
         runLog: RunLog,
@@ -65,6 +69,7 @@ public struct CleanerService: @unchecked Sendable {
         fileManager: FileManager = .default,
         home: String = FileManager.default.homeDirectoryForCurrentUser.path,
         androidSDKPath: String? = nil,
+        simLease: SimLeaseReader? = nil,
         clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.settingsStore = settingsStore
@@ -76,6 +81,7 @@ public struct CleanerService: @unchecked Sendable {
         self.home = home
         self.androidSDKPath = androidSDKPath
             ?? (home as NSString).appendingPathComponent("Library/Android/sdk")
+        self.simLease = simLease ?? .standard(home: home, fileManager: fileManager)
         self.clock = clock
     }
 
@@ -260,7 +266,11 @@ public struct CleanerService: @unchecked Sendable {
             home: home, androidSDKPath: androidSDKPath).load()
 
         let record = await executor.run(
-            items: items, devices: devices, startedAt: now, progress: progress)
+            items: items, devices: devices,
+            // Read again here rather than trusted from the scan: the rows may be from a
+            // cached scan, and a lease taken since then is exactly what this is for.
+            simLease: simLease.read(now: now),
+            startedAt: now, progress: progress)
         return store(record)
     }
 
@@ -363,7 +373,8 @@ public struct CleanerService: @unchecked Sendable {
             home: home, androidSDKPath: androidSDKPath).load()
 
         let protection = ProtectionResolver(settings: settings, fileManager: fileManager)
-            .resolve(projects: projects, activity: activity, devices: devices, now: now)
+            .resolve(projects: projects, activity: activity, devices: devices,
+                     simLease: simLease.read(now: now), now: now)
 
         return ScanContext(
             settings: settings, protection: protection, projects: projects,

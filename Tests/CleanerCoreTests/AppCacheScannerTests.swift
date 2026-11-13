@@ -592,7 +592,7 @@ private func context(temp: TempDir, sizes: [String: Int64] = [:],
         runLog: RunLog(directory: temp.url.appendingPathComponent("runs")),
         runner: FakeProcessRunner(responses: [:]), remover: FakeFileRemover(),
         sizeMeasurer: FixedSizeMeasurer(sizes), fileManager: .default, home: temp.path,
-        androidSDKPath: temp.path + "/sdk", clock: { now })
+        androidSDKPath: temp.path + "/sdk", simLease: simLeaseReader(in: temp), clock: { now })
     let record = await service.cleanDefault(result, now: now) { _ in }
 
     #expect(record.entries.map(\.itemID) == ["other.xdgCache|\(uv)"])

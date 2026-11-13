@@ -3208,3 +3208,25 @@ private func largeFiles() -> [CleanupItem] {
     #expect(built.cards.map(\.isChecklist) == [false, false])
     #expect(built.cards.map(\.checklistSelectAll) == [nil, nil])
 }
+
+// MARK: - SimLease
+
+/// A simulator SimLease holds is never on the card — so never in what Clean up hands the
+/// engine — and the line beside the card says it is SimLease holding it, which is where the
+/// user goes to change that.
+@Test func aSimulatorSimLeaseHoldsIsKeptOffTheCardAndTheCardSaysWhy() throws {
+    let built = deck([
+        simulatorRow(name: "sample-ios-simulator", udid: "OLD", sizeBytes: 1_000_000_000),
+        simulatorRow(name: "qa-01", udid: "5D2E8A10-7C41-4B9E-9F3A-1C6B0E2D4A71",
+                     sizeBytes: 3_100_000_000, detail: "pinned in SimLease",
+                     protection: .pinnedInSimLease),
+    ])
+
+    let card = try #require(built.cards.first { $0.id == "ios.simulators" })
+    #expect(card.items.map(\.name) == ["sample-ios-simulator"])
+    #expect(card.totalBytes == 1_000_000_000)
+    #expect(card.keptText == "1 kept · pinned in SimLease · 3.1 GB")
+    #expect(ProjectDeckText.keptRows(
+        reasons: [.leasedInSimLease(owner: "agent-one")], bytes: 2_000_000_000)
+        == "1 kept · leased by agent-one in SimLease · 2.0 GB")
+}

@@ -47,6 +47,10 @@ public struct AVDScanner: CleanupScanner {
                 // Ahead of "never started", because a pinned emulator the user has not
                 // booted yet is still kept and "never started" would hide why.
                 detail = "pinned in settings"
+            case .pinnedInSimLease, .leasedInSimLease, .simLeaseUnreadable:
+                // Ahead of the kept label, as on `SimulatorDevicesScanner`: the reason's own
+                // words say it is SimLease holding the emulator, and who.
+                detail = reason?.description
             case _ where avd.name == kept:
                 detail = "the emulator you keep"
             case .recentlyUsedDevice(let days):

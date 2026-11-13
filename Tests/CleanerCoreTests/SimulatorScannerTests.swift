@@ -714,3 +714,73 @@ private func image(_ identifier: String, build: String, bytes: Int64,
     #expect(SimulatorRuntimesScanner().group == .xcodeAndIOS)
     #expect(SimulatorCachesScanner().group == .xcodeAndIOS)
 }
+
+// MARK: SimLease
+
+/// The whole path for the device this was written for: qa-01, signed in to a test account,
+/// pinned in SimLease, and idle for two months. Resolved for real rather than hand-built, so
+/// the row is exactly what a scan would show.
+///
+/// **Never selectable, not merely unticked.** `protection` is what makes a row one the deck
+/// keeps off its card and the executor refuses; `startsUnticked` alone would still leave it
+/// one click from `simctl delete`.
+@Test func aSimLeasePinnedSimulatorIsShownKeptAndCanNeverBeSelected() async throws {
+    let temp = TempDir()
+    let udid = "5D2E8A10-7C41-4B9E-9F3A-1C6B0E2D4A71"
+    let devices = DeviceInventory(simulators: [
+        device(udid, name: "qa-01", size: 3_100_000_000,
+               booted: now.addingTimeInterval(-86_400 * 60)),
+        device("CCC", name: "iPad Pro", size: 2_000_000_000, booted: now),
+        device("OLD", name: "sample-ios-simulator", size: 1_000_000_000,
+               booted: now.addingTimeInterval(-86_400 * 60)),
+    ], runtimes: [], avds: [])
+    let protection = ProtectionResolver(settings: .makeDefault(home: temp.path)).resolve(
+        projects: [], activity: [:], devices: devices,
+        simLease: SimLeaseState(pinnedUDIDs: [udid]), now: now)
+
+    let items = await SimulatorDevicesScanner()
+        .scan(context(devices: devices, protection: protection, temp: temp))
+
+    let pinned = try #require(items.first { $0.name == "qa-01" })
+    #expect(pinned.protection == .pinnedInSimLease)
+    #expect(pinned.detail == "pinned in SimLease")
+    #expect(!pinned.isDeletable)
+    #expect(!pinned.selectedByDefault)
+    // The over-fix guard: the equally idle simulator nobody pinned is still offered.
+    #expect(items.filter(\.selectedByDefault).map(\.name) == ["sample-ios-simulator"])
+}
+
+/// A leased simulator says who has it, even when it is also the one kept — "the simulator
+/// you keep" would send the user to this app's settings for something SimLease decided.
+@Test func aLeasedSimulatorSaysWhoHasItEvenWhenItIsTheOneKept() async throws {
+    let temp = TempDir()
+    let devices = DeviceInventory(simulators: [
+        device("CCC", name: "iPad Pro", size: 2_000_000_000, booted: now, isBooted: true),
+    ], runtimes: [], avds: [])
+
+    let items = await SimulatorDevicesScanner().scan(context(
+        devices: devices,
+        protection: protection(keptSimulator: "CCC",
+                               protected: ["CCC": .leasedInSimLease(owner: "agent-one")]),
+        temp: temp))
+
+    let leased = try #require(items.first)
+    #expect(leased.detail == "leased by agent-one in SimLease")
+    #expect(!leased.isDeletable)
+}
+
+@Test func aSimulatorKeptOnlyBecauseSimLeaseCouldNotBeReadSaysSo() async throws {
+    let temp = TempDir()
+    let devices = DeviceInventory(simulators: [
+        device("OLD", name: "sample-ios-simulator", size: 1_000_000_000,
+               booted: now.addingTimeInterval(-86_400 * 60)),
+    ], runtimes: [], avds: [])
+
+    let items = await SimulatorDevicesScanner().scan(context(
+        devices: devices,
+        protection: protection(keptSimulator: nil, protected: ["OLD": .simLeaseUnreadable]),
+        temp: temp))
+
+    #expect(items.first?.detail == "SimLease state could not be read")
+    #expect(items.first?.isDeletable == false)
+}

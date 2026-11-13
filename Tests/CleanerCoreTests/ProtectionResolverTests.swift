@@ -665,3 +665,146 @@ private let ancient = now.addingTimeInterval(-86_400 * 30)
     #expect(set.gradleDistributions["gradle-8.14-all"] == .gradleVersionInUse(by: "active"))
     #expect(set.gradleDistributions["gradle-8.14-bin"] == nil)
 }
+
+// MARK: SimLease
+//
+// SimLease pins Simulators whose state is worth keeping — one signed in to a test account,
+// two seeded with exactly ten capture clips — and leases devices to agents. Nothing about
+// a pinned Simulator is recent: it is kept *because* nobody boots it. Before these rules,
+// one left idle past `deviceRecentUseDays` was offered to `simctl delete`.
+
+private let signedIn = "5D2E8A10-7C41-4B9E-9F3A-1C6B0E2D4A71"
+
+private func lease(_ id: String, avd: String? = nil, owner: String?) -> SimLeaseLease {
+    SimLeaseLease(deviceID: id, deviceName: avd, owner: owner,
+                  expiresAt: now.addingTimeInterval(3_600))
+}
+
+@Test func aSimLeasePinnedSimulatorIsProtectedHoweverLongItHasSatIdle() {
+    let devices = DeviceInventory(
+        simulators: [
+            simulator(signedIn, name: "qa-01", booted: now.addingTimeInterval(-86_400 * 60)),
+            simulator("WINNER", name: "iPad Pro", booted: now),
+            simulator("STALE", name: "sample-ios-simulator",
+                      booted: now.addingTimeInterval(-86_400 * 60)),
+        ],
+        runtimes: [], avds: [])
+    let set = ProtectionResolver(settings: settings()).resolve(
+        projects: [], activity: [:], devices: devices,
+        simLease: SimLeaseState(pinnedUDIDs: [signedIn]), now: now)
+
+    #expect(set.protectedSimulatorUDIDs[signedIn] == .pinnedInSimLease)
+    // A SimLease pin protects; it does not relabel. The kept simulator is still the newest.
+    #expect(set.keptSimulatorUDID == "WINNER")
+    // The over-fix guard: a simulator as old as the pinned one, and not pinned, is offered.
+    #expect(set.protectedSimulatorUDIDs["STALE"] == nil)
+}
+
+/// Pinned and never booted is the capture Simulators' normal state between runs. A rule
+/// that read timestamps first would never reach them.
+@Test func aSimLeasePinnedSimulatorThatHasNeverBootedIsProtected() {
+    let devices = DeviceInventory(
+        simulators: [simulator(signedIn, name: "qa-01", booted: nil)], runtimes: [], avds: [])
+    let set = ProtectionResolver(settings: settings()).resolve(
+        projects: [], activity: [:], devices: devices,
+        simLease: SimLeaseState(pinnedUDIDs: [signedIn.lowercased()]), now: now)
+    #expect(set.protectedSimulatorUDIDs[signedIn] == .pinnedInSimLease)
+}
+
+/// A pin naming a Simulator that is not installed is not reported as protected — the same
+/// rule as the settings pin — so the listing does not count a device that is not there.
+@Test func aSimLeasePinForASimulatorThatIsNotInstalledAddsNothing() {
+    let devices = DeviceInventory(
+        simulators: [simulator("AAA", name: "iPhone", booted: nil)], runtimes: [], avds: [])
+    let set = ProtectionResolver(settings: settings()).resolve(
+        projects: [], activity: [:], devices: devices,
+        simLease: SimLeaseState(pinnedUDIDs: [signedIn]), now: now)
+    #expect(set.protectedSimulatorUDIDs.isEmpty)
+}
+
+/// Leased beats running, because a leased Simulator is nearly always booted and only the
+/// lease says who is in it. Pinned-in-SimLease beats the settings pin and the newest rule.
+@Test func aSimLeaseReasonWinsOverRunningPinnedAndNewest() {
+    let configured = settings { $0.pinnedSimulatorUDID = "PINNED" }
+    let devices = DeviceInventory(
+        simulators: [
+            simulator("LEASED", name: "iPhone 17", booted: now, isBooted: true),
+            simulator("PINNED", name: "qa-01", booted: now.addingTimeInterval(-86_400 * 90)),
+        ],
+        runtimes: [], avds: [])
+    let set = ProtectionResolver(settings: configured).resolve(
+        projects: [], activity: [:], devices: devices,
+        simLease: SimLeaseState(pinnedUDIDs: ["PINNED"],
+                                leases: [lease("LEASED", owner: "agent-one")]),
+        now: now)
+
+    #expect(set.protectedSimulatorUDIDs["LEASED"] == .leasedInSimLease(owner: "agent-one"))
+    #expect(set.protectedSimulatorUDIDs["PINNED"] == .pinnedInSimLease)
+    // The label is still the settings pin: SimLease adds protection and changes no label.
+    #expect(set.keptSimulatorUDID == "PINNED")
+}
+
+/// **The Android half of the gap.** A SimLease lease boots a read-only instance of the AVD,
+/// which writes nothing to the AVD's own files, so every timestamp says nobody has touched
+/// it. Only the lease knows.
+@Test func anAVDWithALeasedInstanceIsProtectedThoughItsFilesLookUntouched() {
+    let devices = DeviceInventory(simulators: [], runtimes: [], avds: [
+        avd("work_avd", used: now.addingTimeInterval(-86_400 * 45)),
+        avd("sample_emulator", used: now),
+        avd("old_emulator", used: now.addingTimeInterval(-86_400 * 45)),
+    ])
+    let set = ProtectionResolver(settings: settings()).resolve(
+        projects: [], activity: [:], devices: devices,
+        simLease: SimLeaseState(leases: [
+            lease("emulator-5560", avd: "work_avd", owner: "ui-check"),
+        ]),
+        now: now)
+
+    #expect(set.protectedAVDNames["work_avd"] == .leasedInSimLease(owner: "ui-check"))
+    #expect(set.keptAVDName == "sample_emulator")
+    #expect(set.protectedAVDNames["old_emulator"] == nil)
+}
+
+/// Doubt keeps every device on its platform, and says so only where nothing better is
+/// known: a device kept for a reason that is actually known shows that reason.
+@Test func simLeaseStateThatCannotBeReadKeepsEveryDeviceAtTheLowestPrecedence() {
+    let devices = DeviceInventory(
+        simulators: [
+            simulator("WINNER", name: "iPad Pro", booted: now),
+            simulator("STALE", name: "sample-ios-simulator",
+                      booted: now.addingTimeInterval(-86_400 * 60)),
+        ],
+        runtimes: [],
+        avds: [avd("old_emulator", used: now.addingTimeInterval(-86_400 * 60)),
+               avd("sample_emulator", used: now)])
+    let set = ProtectionResolver(settings: settings()).resolve(
+        projects: [], activity: [:], devices: devices,
+        simLease: SimLeaseState(simulatorsInDoubt: true), now: now)
+
+    #expect(set.protectedSimulatorUDIDs["STALE"] == .simLeaseUnreadable)
+    #expect(set.protectedSimulatorUDIDs["WINNER"] == .mostRecentlyUsedDevice)
+    // Simulators in doubt say nothing about emulators.
+    #expect(set.protectedAVDNames["old_emulator"] == nil)
+}
+
+/// The runtime under a SimLease-pinned Simulator is kept with it. Deleting it leaves qa-01
+/// installed, still signed in, and unable to boot.
+@Test func theRuntimeOfASimLeasePinnedSimulatorIsProtectedToo() {
+    let devices = DeviceInventory(
+        simulators: [
+            simulator("WINNER", name: "iPad Pro", booted: now, runtime: "iOS-26-5"),
+            simulator(signedIn, name: "qa-01",
+                      booted: now.addingTimeInterval(-86_400 * 60), runtime: "iOS-18-2"),
+        ],
+        runtimes: [
+            SimulatorRuntime(identifier: "iOS-26-5", name: "iOS 26.5", version: "26.5",
+                             buildVersion: "23F77", bundlePath: "/rt/26.5.simruntime"),
+            SimulatorRuntime(identifier: "iOS-18-2", name: "iOS 18.2", version: "18.2",
+                             buildVersion: "22C150", bundlePath: "/rt/18.2.simruntime"),
+        ],
+        avds: [])
+    let set = ProtectionResolver(settings: settings()).resolve(
+        projects: [], activity: [:], devices: devices,
+        simLease: SimLeaseState(pinnedUDIDs: [signedIn]), now: now)
+    #expect(set.runtimeIdentifiers["iOS-18-2"] == .runtimeUsedByProtectedDevice)
+}

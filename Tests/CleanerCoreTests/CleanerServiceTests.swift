@@ -40,6 +40,7 @@ private func makeServiceReadingStoredSettings(
         fileManager: .default,
         home: temp.path,
         androidSDKPath: androidSDKPath ?? temp.path + "/Library/Android/sdk",
+        simLease: simLeaseReader(in: temp),
         clock: { finished })
 }
 
@@ -1812,4 +1813,91 @@ private final class Reported: @unchecked Sendable {
         .decode(ScanResult.self, from: JSONSerialization.data(withJSONObject: object))
     #expect(decoded.items.map(\.name) == ["b"])
     #expect(decoded.reclaimableBytes == 200)
+}
+
+// MARK: - SimLease
+
+private let signedInUDID = "5D2E8A10-7C41-4B9E-9F3A-1C6B0E2D4A71"
+
+/// Three simulators: qa-01, pinned in SimLease and idle for two months; one just as idle and
+/// pinned nowhere; and one booted today, which is the one kept.
+private func simLeaseDevicesRunner() -> RecordingProcessRunner {
+    let formatter = ISO8601DateFormatter()
+    let old = formatter.string(from: now.addingTimeInterval(-86_400 * 60))
+    let today = formatter.string(from: now)
+    return RecordingProcessRunner(responses: [
+        "/usr/bin/xcrun simctl list devices --json": ProcessResult(
+            exitCode: 0,
+            stdout: """
+                {"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-5":[
+                 {"udid":"\(signedInUDID)","name":"qa-01","state":"Shutdown",
+                  "isAvailable":true,"dataPathSize":3100000000,"lastBootedAt":"\(old)"},
+                 {"udid":"OLD","name":"sample-ios-simulator","state":"Shutdown",
+                  "isAvailable":true,"dataPathSize":1000000000,"lastBootedAt":"\(old)"},
+                 {"udid":"NEW","name":"iPad Pro","state":"Shutdown",
+                  "isAvailable":true,"dataPathSize":2000000000,"lastBootedAt":"\(today)"}]}}
+                """, stderr: ""),
+    ])
+}
+
+private func writeLease(in temp: TempDir, udid: String, deviceName: String, owner: String) {
+    temp.makeFile("simlease/leases/\(udid).json", contents: """
+        {"schemaVersion":3,"udid":"\(udid)","deviceName":"\(deviceName)","owner":"\(owner)",
+         "expiresAtEpoch":\(Int(now.timeIntervalSince1970) + 3_600),"lifecycleState":"leased"}
+        """)
+}
+
+/// **The wiring, end to end, through the path the app and the CLI both take.** The resolver
+/// and the scanners are tested on their own; what only this catches is a service that builds
+/// its context without reading SimLease — which is exactly how this app shipped.
+@Test func aSimLeasePinnedSimulatorIsProtectedByAScanEndToEnd() async throws {
+    let temp = TempDir()
+    temp.makeFile(".config/simlease/pinned", contents: """
+        # Simulator UDIDs automatic simlease picks skip (signed in, seeded media).
+        \(signedInUDID)  # qa-01: signed in to the test account
+        """)
+    // An emulator an agent is running a read-only instance of. Its own files are six weeks
+    // old, because a read-only instance writes nothing to them.
+    temp.makeFile(".android/avd/work_avd.avd/config.ini", contents: "",
+                  modified: now.addingTimeInterval(-86_400 * 45))
+    temp.makeFile(".android/avd/sample_emulator.avd/config.ini", contents: "", modified: now)
+    writeLease(in: temp, udid: "emulator-5560", deviceName: "work_avd", owner: "ui-check")
+
+    let service = try makeService(temp: temp, runner: simLeaseDevicesRunner())
+    let scan = await service.scan(now: now)
+
+    let pinned = try #require(scan.items.first { $0.name == "qa-01" })
+    #expect(pinned.protection == .pinnedInSimLease)
+    #expect(pinned.detail == "pinned in SimLease")
+    let leased = try #require(scan.items.first { $0.name == "work_avd" })
+    #expect(leased.protection == .leasedInSimLease(owner: "ui-check"))
+
+    // Neither is in the list a default clean acts on; the simulator nobody pinned is.
+    let selected = Set(scan.defaultSelection.map(\.name))
+    #expect(!selected.contains("qa-01"))
+    #expect(!selected.contains("work_avd"))
+    #expect(selected.contains("sample-ios-simulator"))
+
+    // And the CLI listing says why, in the same words.
+    let listing = ReportText(home: temp.path).scan(scan, now: now, moveToTrash: true)
+    #expect(listing.contains("pinned in SimLease"))
+    #expect(listing.contains("leased by ui-check in SimLease"))
+}
+
+/// The scan the user is looking at may be minutes old, or a `cache.json` from yesterday. A
+/// lease taken since then is read again by `clean`, and the device is left alone.
+@Test func aCleanReadsSimLeaseAgainAndLeavesADeviceLeasedSinceTheScan() async throws {
+    let temp = TempDir()
+    let runner = simLeaseDevicesRunner()
+    let service = try makeService(temp: temp, runner: runner)
+    let scan = await service.scan(now: now)
+    let row = try #require(scan.defaultSelection.first { $0.name == "sample-ios-simulator" })
+
+    writeLease(in: temp, udid: "OLD", deviceName: "sample-ios-simulator", owner: "late-agent")
+    let record = await service.clean(items: [row], now: now) { _ in }
+
+    #expect(!runner.recorded.contains { $0.contains("simctl delete") })
+    let entry = try #require(record.entries.first)
+    #expect(entry.outcome == .skipped)
+    #expect(entry.reason?.hasPrefix("leased by late-agent in SimLease") == true)
 }

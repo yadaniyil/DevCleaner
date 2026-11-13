@@ -51,5 +51,9 @@ swift run devcleaner clean --dry-run
   data in a place, treat it as theirs: per-item, click-only, or not offered at all.
 - When testing the real app on a real Mac: look, screenshot, press Skip — **never press
   Clean up on the user's files** unless they ask.
+- Simulators pinned in SimLease (`~/.config/simlease/pinned`) and every Simulator or AVD
+  with an active SimLease lease are always protected (`SimLeaseState`, read from files,
+  never by running `simlease`). Never run the app's delete paths against real devices:
+  tests use temp dirs (`simLeaseReader(in:)`) and fake runners only.
 - Cleaning this project's own card trashes `build/DevCleaner.app` while it runs. Rebuild with
   `Scripts/make-app.sh release`.

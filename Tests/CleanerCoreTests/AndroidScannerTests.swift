@@ -761,3 +761,43 @@ private func settings(home: String, _ mutate: (inout Settings) -> Void) -> Setti
     #expect(result.items.isEmpty)
     #expect(result.skippedScannerIDs == ["android.ndk"])
 }
+
+// MARK: SimLease
+
+/// An AVD an agent is running a read-only instance of, resolved for real. Its own files say
+/// nobody has touched it in six weeks; the lease says an agent is in it now. The emulator
+/// and the system image under it are both kept, and neither can be selected.
+@Test func anAVDLeasedInSimLeaseIsKeptWithItsSystemImageAndCanNeverBeSelected() async throws {
+    let temp = TempDir()
+    let image = temp.makeDirectory(
+        "Library/Android/sdk/system-images/android-35/google_apis/arm64-v8a")
+    let devices = DeviceInventory(simulators: [], runtimes: [], avds: [
+        avd("work_avd", used: now.addingTimeInterval(-86_400 * 45),
+            image: "system-images/android-35/google_apis/arm64-v8a"),
+        avd("old_emulator", used: now.addingTimeInterval(-86_400 * 45)),
+        // The newest, so it is the one kept and the two above are judged on SimLease alone.
+        avd("sample_emulator", used: now),
+    ])
+    let protection = ProtectionResolver(settings: .makeDefault(home: temp.path)).resolve(
+        projects: [], activity: [:], devices: devices,
+        simLease: SimLeaseState(leases: [SimLeaseLease(
+            deviceID: "emulator-5560", deviceName: "work_avd", owner: "ui-check",
+            expiresAt: now.addingTimeInterval(3_600))]),
+        now: now)
+    let scan = context(temp: temp, devices: devices, protection: protection,
+                       sizes: ["/avd/work_avd.avd": 6_000_000_000,
+                               "/avd/old_emulator.avd": 5_000_000_000,
+                               image: 1_400_000_000])
+
+    let emulators = await AVDScanner().scan(scan)
+    let leased = try #require(emulators.first { $0.name == "work_avd" })
+    #expect(leased.protection == .leasedInSimLease(owner: "ui-check"))
+    #expect(leased.detail == "leased by ui-check in SimLease")
+    #expect(!leased.isDeletable)
+    #expect(!leased.selectedByDefault)
+    // The over-fix guard: an emulator nobody leased, just as old, is still offered.
+    #expect(emulators.filter(\.selectedByDefault).map(\.name) == ["old_emulator"])
+
+    let images = await SystemImagesScanner().scan(scan)
+    #expect(images.first?.protection == .sdkInUse(by: "work_avd"))
+}

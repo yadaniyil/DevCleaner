@@ -53,6 +53,12 @@ public struct SimulatorDevicesScanner: CleanupScanner {
                 // Ahead of "never booted", because a pinned device the user has not
                 // booted yet is still kept and "never booted" would hide why.
                 detail = "pinned in settings"
+            case .pinnedInSimLease, .leasedInSimLease, .simLeaseUnreadable:
+                // Ahead of the kept label for the same reason as the pin above: the newest
+                // simulator can be the one SimLease holds, and "the simulator you keep"
+                // would send the user to this app's settings to change something that
+                // lives in SimLease. The reason's own words name SimLease and the owner.
+                detail = reason?.description
             case _ where device.udid == kept:
                 detail = "the simulator you keep"
             case .recentlyUsedDevice(let days):

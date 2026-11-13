@@ -821,6 +821,7 @@ private struct SilentScanner: CleanupScanner {
         fileManager: .default,
         home: temp.path,
         androidSDKPath: sdk,
+        simLease: simLeaseReader(in: temp),
         clock: { Date(timeIntervalSince1970: 1_786_000_042) })
     let text = ReportText(home: temp.path)
 

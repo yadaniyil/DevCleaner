@@ -7,7 +7,8 @@ public struct ProtectionSet: Sendable, Equatable {
     /// Every device that must not be deleted by default, with the reason to show for
     /// each. Keyed by UDID and by AVD name. A device is a member when it is pinned,
     /// when it is the newest, when it was used within `Settings.deviceRecentUseDays`,
-    /// or when its timestamp is within `indistinguishableWindow` of the newest.
+    /// or when its timestamp is within `indistinguishableWindow` of the newest — and
+    /// whatever those say, when SimLease pins it or leases it (see `SimLeaseState`).
     ///
     /// Wider than `keptSimulatorUDID` on purpose. A device cannot be moved to the
     /// Trash, so the default selection must not offer one the user was working with
@@ -73,15 +74,19 @@ public struct ProtectionResolver: @unchecked Sendable {
         self.fileManager = fileManager
     }
 
+    /// `simLease` defaults to nothing held so that every existing caller compiles and means
+    /// what it meant. `CleanerService` is the one caller that reads the real thing, and
+    /// `aSimLeasePinnedSimulatorIsProtectedByAScanEndToEnd` is what holds it to that.
     public func resolve(
         projects: [DiscoveredProject],
         activity: [String: Date],
         devices: DeviceInventory,
+        simLease: SimLeaseState = .empty,
         now: Date
     ) -> ProtectionSet {
         let protectedProjects = resolveProjects(projects, activity: activity, now: now)
-        let keptSimulator = resolveSimulators(devices.simulators, now: now)
-        let keptAVD = resolveAVDs(devices.avds, now: now)
+        let keptSimulator = resolveSimulators(devices.simulators, simLease: simLease, now: now)
+        let keptAVD = resolveAVDs(devices.avds, simLease: simLease, now: now)
 
         return ProtectionSet(
             projects: protectedProjects,
@@ -119,7 +124,7 @@ public struct ProtectionResolver: @unchecked Sendable {
     // MARK: devices
 
     private func resolveSimulators(
-        _ simulators: [SimulatorDevice], now: Date
+        _ simulators: [SimulatorDevice], simLease: SimLeaseState, now: Date
     ) -> (kept: String?, protected: [String: ProtectionReason]) {
         resolveDevices(
             simulators.map { (id: $0.udid, date: $0.lastBootedAt) },
@@ -129,32 +134,42 @@ public struct ProtectionResolver: @unchecked Sendable {
             // is when the boot *started*, so one left running for eight days looks
             // untouched for over a week to every timestamp rule below.
             running: Set(simulators.filter(\.isBooted).map(\.udid)),
+            heldBySimLease: simLease.definiteReason(forSimulator:),
+            simLeaseInDoubt: simLease.simulatorsInDoubt,
             now: now)
     }
 
     private func resolveAVDs(
-        _ avds: [AndroidAVD], now: Date
+        _ avds: [AndroidAVD], simLease: SimLeaseState, now: Date
     ) -> (kept: String?, protected: [String: ProtectionReason]) {
         resolveDevices(
             avds.map { (id: $0.name, date: $0.lastUsed) },
-            pinned: settings.pinnedAVDName, now: now)
+            pinned: settings.pinnedAVDName,
+            // The only sign in this whole resolver that an emulator is in use right now.
+            // A SimLease lease boots a read-only instance, which writes nothing to the AVD,
+            // so every timestamp rule below sees an emulator nobody has touched.
+            heldBySimLease: simLease.definiteReason(forAVD:),
+            simLeaseInDoubt: simLease.emulatorsInDoubt,
+            now: now)
     }
 
     /// Decides which devices survive a default clean, and why.
     ///
-    /// Five rules, applied as a union rather than as alternatives — protection is
+    /// Seven rules, applied as a union rather than as alternatives — protection is
     /// never taken away by another rule matching. `kept` is the single device to
     /// label as the one being kept, and stays what it has always been: the pin when
-    /// a pin names a device that exists, otherwise the newest. Being booted does not
-    /// change that label; it only adds protection.
+    /// a pin names a device that exists, otherwise the newest. Being booted, or being
+    /// held by SimLease, does not change that label; it only adds protection.
     ///
     /// Written lowest-precedence first so that a later rule overwrites the reason an
-    /// earlier one recorded for the same device. The stated order is running now, then
-    /// pinned, then most recently used, then recently used, then the tie — so it is
-    /// applied in reverse here.
+    /// earlier one recorded for the same device. The stated order is held by SimLease,
+    /// then running now, then pinned, then most recently used, then recently used, then
+    /// the tie, then SimLease state that could not be read — so it is applied in reverse
+    /// here.
     ///
-    /// A device with no timestamp can only ever get in by being pinned or by running.
-    /// It can never be the newest, can never be recent, and can never tie.
+    /// A device with no timestamp can only ever get in by being pinned, by running, or
+    /// through SimLease. It can never be the newest, can never be recent, and can never
+    /// tie.
     ///
     /// `running` is empty for emulators. Whether an AVD is running is not in the
     /// inventory at all — it is a question for `adb`, which `Executor.runningEmulators`
@@ -162,13 +177,24 @@ public struct ProtectionResolver: @unchecked Sendable {
     /// there. Simulators had no equivalent until this rule.
     private func resolveDevices(
         _ candidates: [(id: String, date: Date?)], pinned: String?,
-        running: Set<String> = [], now: Date
+        running: Set<String> = [],
+        heldBySimLease: (String) -> ProtectionReason? = { _ in nil },
+        simLeaseInDoubt: Bool = false,
+        now: Date
     ) -> (kept: String?, protected: [String: ProtectionReason]) {
         let dated = candidates.compactMap { candidate in
             candidate.date.map { (id: candidate.id, date: $0) }
         }
         let winner = Self.newest(dated)
         var protected: [String: ProtectionReason] = [:]
+
+        // 5. SimLease has something on disk that could not be read. First, so every
+        //    reason that is actually known overwrites it: this one is only here for the
+        //    devices nothing else keeps, and it keeps all of them, because which one the
+        //    unreadable file names is exactly what is not known.
+        if simLeaseInDoubt {
+            for candidate in candidates { protected[candidate.id] = .simLeaseUnreadable }
+        }
 
         // 4. Within `indistinguishableWindow` of the newest. Mostly subsumed by rule
         //    3, but it is the only thing standing between a pair of devices that tie
@@ -203,6 +229,15 @@ public struct ProtectionResolver: @unchecked Sendable {
         //    pin, so a device with no timestamp is still covered.
         for candidate in candidates where running.contains(candidate.id) {
             protected[candidate.id] = .bootedDevice
+        }
+
+        // -1. Held by SimLease: leased right now, or pinned there. Above running, because a
+        //     leased Simulator is nearly always booted and "leased by <owner>" says who is
+        //     in it, and a SimLease pin says why the device matters at all — a signed-in
+        //     account — where "running right now" says only that it is on. Checked against
+        //     the full candidate list, so a pinned device that has never booted is kept.
+        for candidate in candidates {
+            if let reason = heldBySimLease(candidate.id) { protected[candidate.id] = reason }
         }
 
         return (livePin ?? winner?.id, protected)

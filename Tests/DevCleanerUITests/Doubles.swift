@@ -522,6 +522,11 @@ func makeLiveEngine(temp: TempDir) -> LiveCleanerEngine {
         runner: StubRunner(), remover: StubRemover(), sizeMeasurer: StubMeasurer(),
         fileManager: .default, home: temp.path,
         androidSDKPath: temp.path + "/Library/Android/sdk",
+        // Temporary paths, never `$TMPDIR/simlease`: a real lease on this Mac must not be
+        // able to change what a test sees.
+        simLease: SimLeaseReader(
+            pinnedFiles: [temp.path + "/.config/simlease/pinned"],
+            leaseDirectories: [temp.path + "/simlease/leases"]),
         clock: { now })
     return LiveCleanerEngine(service: service, runLog: runLog)
 }
