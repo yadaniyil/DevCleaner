@@ -430,6 +430,7 @@ public struct ProjectBuildOutputScanner: CleanupScanner {
             return true
         case .pinnedProject,
              .mostRecentlyUsedDevice, .recentlyUsedDevice, .pinnedDevice, .bootedDevice,
+             .pinnedInSimLease, .leasedInSimLease, .simLeaseUnreadable,
              .sdkInUse, .newestRuntime, .runtimeUsedByKeptDevice,
              .runtimeUsedByProtectedDevice, .runtimeImageNotDeletable,
              .gradleVersionInUse, .newestDeviceSupport:
@@ -474,6 +475,7 @@ public struct ProjectBuildOutputScanner: CleanupScanner {
         case .pinnedProject:
             return "pinned in settings"
         case .mostRecentlyUsedDevice, .recentlyUsedDevice, .pinnedDevice, .bootedDevice,
+             .pinnedInSimLease, .leasedInSimLease, .simLeaseUnreadable,
              .sdkInUse, .newestRuntime, .runtimeUsedByKeptDevice,
              .runtimeUsedByProtectedDevice, .runtimeImageNotDeletable,
              .gradleVersionInUse, .newestDeviceSupport:

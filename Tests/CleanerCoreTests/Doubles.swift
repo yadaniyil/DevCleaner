@@ -192,3 +192,15 @@ actor CallCountingSizeMeasurer: SizeMeasuring {
         return result
     }
 }
+
+/// A SimLease reader over a temporary home, and never over the real one.
+///
+/// `CleanerService` defaults to `SimLeaseReader.standard`, which reads `$TMPDIR/simlease` —
+/// the developer's own leases. A test service that did that would pass or fail depending on
+/// what some agent on this Mac happened to be running. The layout mirrors SimLease's own:
+/// `<temp>/.config/simlease/pinned` and `<temp>/simlease/leases/<udid>.json`.
+func simLeaseReader(in temp: TempDir) -> SimLeaseReader {
+    SimLeaseReader(
+        pinnedFiles: [temp.path + "/.config/simlease/pinned"],
+        leaseDirectories: [temp.path + "/simlease/leases"])
+}

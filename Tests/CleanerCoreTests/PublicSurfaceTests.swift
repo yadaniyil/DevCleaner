@@ -52,6 +52,16 @@ import CleanerCore
     // app that wants to preview a scan has to be able to build one.
     let project = DiscoveredProject(path: "/dev/sample-project", name: "sample-project")
     #expect(project.name == "sample-project")
+
+    // SimLease's state, which `CleanerService` takes a reader for and a preview may want to
+    // build by hand.
+    let lease = SimLeaseLease(deviceID: "emulator-5560", deviceName: "work_avd",
+                              owner: "ui-check", expiresAt: nil)
+    let simLease = SimLeaseState(pinnedUDIDs: ["AAA"], leases: [lease])
+    #expect(simLease.reason(forSimulator: "AAA") == .pinnedInSimLease)
+    #expect(simLease.reason(forAVD: "work_avd") == .leasedInSimLease(owner: "ui-check"))
+    let reader = SimLeaseReader(pinnedFiles: [], leaseDirectories: [])
+    #expect(reader.read(now: Date(timeIntervalSince1970: 1_786_000_000)) == .empty)
 }
 
 /// Everything the checklist card is built out of has to be reachable **without**

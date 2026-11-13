@@ -79,6 +79,28 @@ public enum ProtectionReason: Codable, Sendable, Equatable, CustomStringConverti
     /// in it. `simctl delete` destroys the device directory — every installed app, its
     /// databases, its user defaults — and there is no Trash and no undo.
     case bootedDevice
+    /// Listed in SimLease's pinned file, `~/.config/simlease/pinned`.
+    ///
+    /// SimLease's word for a Simulator whose state is worth keeping — a signed-in test
+    /// account, a seeded photo library — and a device kept for that reason is one nobody
+    /// boots, so every timestamp rule here reads it as abandoned. A pin kept by another tool
+    /// is still the user saying no by hand, and it is as hard a no as `.pinnedDevice`.
+    case pinnedInSimLease
+    /// Held by a SimLease lease that is still running: an agent is using it right now.
+    ///
+    /// For an emulator the lease runs a read-only *instance* of the AVD, so the AVD's own
+    /// files show no sign of use and only the lease says it is busy. `owner` is the lease's
+    /// `--owner`, several joined when several leases run one AVD, and `nil` when the lease
+    /// file could not be read.
+    case leasedInSimLease(owner: String?)
+    /// SimLease has state on this Mac that could not be read, so which device it names is
+    /// not known.
+    ///
+    /// The one device reason that is a doubt rather than a fact. It exists because the other
+    /// answer is a guess, and a wrong guess about a device is permanent: an emulator lease
+    /// that does not say which AVD it runs protects every AVD, not none. Lowest precedence of
+    /// every device rule, so any reason that is actually known is the one shown.
+    case simLeaseUnreadable
     case sdkInUse(by: String)
     case newestRuntime
     case runtimeUsedByKeptDevice
@@ -115,6 +137,12 @@ public enum ProtectionReason: Codable, Sendable, Equatable, CustomStringConverti
         case .recentlyUsedDevice(let days): return "used in the last \(days) days"
         case .pinnedDevice:                return "pinned"
         case .bootedDevice:                return "running right now"
+        // Each names SimLease, because that is where the user goes to change it: a device
+        // "pinned" with nothing more sends them to this app's settings, where it is not.
+        case .pinnedInSimLease:            return "pinned in SimLease"
+        case .leasedInSimLease(let owner):
+            return owner.map { "leased by \($0) in SimLease" } ?? "leased in SimLease"
+        case .simLeaseUnreadable:          return "SimLease state could not be read"
         case .sdkInUse(let project):       return "used by \(project)"
         case .newestRuntime:               return "newest installed runtime"
         case .runtimeUsedByKeptDevice:     return "used by the simulator you keep"

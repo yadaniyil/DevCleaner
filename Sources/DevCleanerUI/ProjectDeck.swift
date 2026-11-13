@@ -220,6 +220,7 @@ public enum ProjectDeckText {
             return "You changed this in the last \(days) days. \(consequence)"
         case .pinnedProject,
              .mostRecentlyUsedDevice, .recentlyUsedDevice, .pinnedDevice, .bootedDevice,
+             .pinnedInSimLease, .leasedInSimLease, .simLeaseUnreadable,
              .sdkInUse, .newestRuntime, .runtimeUsedByKeptDevice,
              .runtimeUsedByProtectedDevice, .runtimeImageNotDeletable,
              .gradleVersionInUse, .newestDeviceSupport:
